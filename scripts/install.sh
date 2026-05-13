@@ -123,6 +123,40 @@ fi
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
+# === ~/.pre/rc (user init — proxy / PATH / nvm 等可执行) ===
+# 区别于 ~/.pre/env (纯 KV, 不能跑命令). rc 由 bus_ctl.sh + tmux_startup.sh source.
+# 不存在 → 写注释模板; 存在 → preserve, 不覆盖用户配置.
+RC_FILE_PRE="$PRE_DATA/rc"
+RC_STATUS="kept"
+if [ ! -f "$RC_FILE_PRE" ]; then
+    cat > "$RC_FILE_PRE" <<'PRERC_EOF'
+# ~/.pre/rc — pre 用户级 init (可执行, 跑 shell 命令).
+# 调用点:
+#   - scripts/bus_ctl.sh 启动 master / node / cron / ui 之前 source
+#   - scripts/tmux_startup.sh 起 agent tmux session 之前 source (优先于 spawn.rc)
+# 区别 ~/.pre/env: env 是 KEY=VALUE 单点 (token / 路径); rc 跑命令 (nvm use / proxy export).
+# pre 升级不覆盖本文件 (install.sh 仅在不存在时写模板).
+
+# ─── proxy (按需取消注释) ───
+# export HTTP_PROXY=http://127.0.0.1:7890
+# export HTTPS_PROXY=http://127.0.0.1:7890
+# export NO_PROXY=localhost,127.0.0.1,::1
+
+# ─── node toolchain (nvm — 按需) ───
+# export NVM_DIR="$HOME/.nvm"
+# [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+# nvm use --silent 20 2>/dev/null
+
+# ─── python toolchain (pyenv — 按需) ───
+# command -v pyenv >/dev/null && eval "$(pyenv init -)"
+
+# ─── 自定义 PATH (按需) ───
+# export PATH="$HOME/.cargo/bin:$PATH"
+PRERC_EOF
+    chmod 600 "$RC_FILE_PRE"
+    RC_STATUS="created (template)"
+fi
+
 # === pre_rule 内容初始化 (system 强更, global 保留) ===
 echo
 echo "─── pre_rule sync ───"
@@ -195,9 +229,13 @@ cat <<EOF
   PRE_RULE_ROOT = $PRE_RULE_ROOT  (from $SRC_RULE)
   PRE_LOG_DIR   = $PRE_LOG_DIR  (from $SRC_LOG)
   env file      = $ENV_FILE  (chmod 600)
+  user rc       = $RC_FILE_PRE  ($RC_STATUS — proxy / PATH / nvm 等可执行 init)
   shim dir      = $ARG_BIN_DIR  (pre, pre-tool-use, pre-stop-hook)
   pre_ui        = $PRE_UI_STATUS
   MCP           = $MCP_STATUS
+
+optional:
+  编辑 $RC_FILE_PRE 加代理 / PATH / nvm 等 — bus_ctl.sh 和 agent tmux 启动时 source.
 
 next steps:
   1. pre bus start          # 起 master + node + ui + cron (tmux 长驻)

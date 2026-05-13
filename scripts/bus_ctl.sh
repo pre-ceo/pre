@@ -33,6 +33,14 @@ if [[ -f "$HOME/.pre/env" ]]; then
     set +a
 fi
 
+# ~/.pre/rc 是 user init (proxy / PATH / nvm 等) — source 后 tmux 起的 python/node 子进程继承
+if [[ -f "$HOME/.pre/rc" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$HOME/.pre/rc"
+    set +a
+fi
+
 SESSION_MASTER="pre-master"
 SESSION_NODE="pre-node"
 SESSION_UI="preui-static"
