@@ -81,6 +81,36 @@ def _repair_agent_config(target_dir: str, opts: dict) -> tuple[str, str]:
     return cfg_path, backup
 
 
+def _repair_pre_rule_mode() -> tuple[str, str, bool]:
+    """如果 pre_rule/config.json 的 mode != enforce, 改 enforce (backup 老的).
+
+    返 (cfg_path, backup_or_empty, changed). changed=False 表示已 enforce 或不动.
+    用途: 老 install 时 template 是 observe (现在 template 已改 enforce 但 install_pre_rule
+    把 config.json 当 global 不覆盖), repair 显式 promote 到 enforce 让 hook 写 marker.
+    """
+    rule_root = os.environ.get("PRE_RULE_ROOT")
+    if not rule_root:
+        return ("", "", False)
+    cfg_path = os.path.join(rule_root, "config.json")
+    if not os.path.isfile(cfg_path):
+        return (cfg_path, "", False)  # 没文件不主动建 (install_pre_rule.py 的事)
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            return (cfg_path, "", False)
+    except (OSError, json.JSONDecodeError):
+        return (cfg_path, "", False)
+    if cfg.get("mode") == "enforce":
+        return (cfg_path, "", False)
+    backup = _backup(cfg_path)
+    cfg["mode"] = "enforce"
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    return (cfg_path, backup, True)
+
+
 def _repair_claude_settings(target_dir: str) -> tuple[str, str]:
     """重写 .claude/settings.json 的 PreToolUse + Stop hooks. 保留其他 hook events."""
     settings_dir = os.path.join(target_dir, ".claude")
@@ -141,13 +171,15 @@ def main() -> int:
                    help="skip pre/agent_config.json rewrite")
     p.add_argument("--no-claude-settings", action="store_true",
                    help="skip .claude/settings.json hook rewrite")
+    p.add_argument("--no-rule-mode", action="store_true",
+                   help="skip pre_rule/config.json mode promotion (default: ensure enforce)")
     args = p.parse_args()
 
     target = os.path.abspath(args.target_dir)
     print(f"{C_MAGENTA}━━━ pre-repair: {target} ━━━{C_RESET}\n")
 
-    if args.no_config and args.no_claude_settings:
-        print(f"{C_YELLOW}both --no-config and --no-claude-settings set; nothing to do{C_RESET}")
+    if args.no_config and args.no_claude_settings and args.no_rule_mode:
+        print(f"{C_YELLOW}all three --no-* flags set; nothing to do{C_RESET}")
         return 1
 
     opts: dict = {}
@@ -157,11 +189,21 @@ def main() -> int:
             opts[k] = v
 
     rewritten: list[tuple[str, str]] = []
+    rule_mode_msg = ""
     try:
         if not args.no_config:
             rewritten.append(_repair_agent_config(target, opts))
         if not args.no_claude_settings:
             rewritten.append(_repair_claude_settings(target))
+        if not args.no_rule_mode:
+            cfg_path, bak, changed = _repair_pre_rule_mode()
+            if changed:
+                rewritten.append((cfg_path, bak))
+                rule_mode_msg = "pre_rule mode → enforce (hook 写 marker, fe ui transcript 可见)"
+            elif cfg_path:
+                rule_mode_msg = f"pre_rule mode 已是 enforce (skip): {cfg_path}"
+            else:
+                rule_mode_msg = "PRE_RULE_ROOT not set / config.json 不存在 (skip)"
     except SystemExit:
         raise
     except OSError as e:
@@ -172,6 +214,8 @@ def main() -> int:
         print(f"{C_CYAN}[rewrote]{C_RESET}  {path}")
         if bak:
             print(f"{C_DIM}  backup: {bak}{C_RESET}")
+    if rule_mode_msg:
+        print(f"{C_DIM}[rule]{C_RESET}     {rule_mode_msg}")
 
     print(f"\n{C_CYAN}━━━ ok ━━━{C_RESET}")
     print(f"{C_DIM}rules.md / next.md / pointer untouched.{C_RESET}")
