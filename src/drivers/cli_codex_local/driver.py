@@ -674,6 +674,9 @@ class CliCodexLocalDriver(BaseDriver):
         else:
             cfg = {
                 "cli": "codex",
+                # driver_type 跟 type_name 一致, pre_mcp _caller_from_agent_config
+                # fallback 用它拼 caller_agent_id (3 段式 <node>.<driver>.<project>).
+                "driver_type": self.type_name,
                 "mode": mode,
                 "tmux_session": tmux_session,
                 "project_name": project_name,

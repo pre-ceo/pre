@@ -39,6 +39,50 @@ def _backup(path: str) -> str:
     return bak
 
 
+_CLI_TO_DRIVER = {
+    "claude": "cli-claude-code-local",
+    "codex":  "cli-codex-local",
+    "gemini": "cli-gemini-local",
+}
+
+
+def _resolve_driver(opts: dict, existing: dict) -> tuple[str, str]:
+    """决定 (cli, driver_type), 落到 agent_config.
+
+    优先级: --driver flag > existing.cli > 交互 prompt (stdin tty) > error.
+    返 (cli, driver_type). 任一缺 raise SystemExit.
+    """
+    cli = opts.get("driver") or existing.get("cli")
+    if not cli:
+        # 交互 prompt
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "agent_config.json 缺 cli 字段, 且未传 --driver. "
+                "重跑时显式: pre repair --driver claude|codex|gemini"
+            )
+        print(f"{C_YELLOW}agent_config.json 缺 cli 字段, 选一个 driver:{C_RESET}")
+        print("  1. claude  (cli-claude-code-local)")
+        print("  2. codex   (cli-codex-local)")
+        print("  3. gemini  (cli-gemini-local)")
+        while True:
+            try:
+                ans = input("选 1/2/3 (or 'q' 退): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                raise SystemExit("\nuser cancelled")
+            if ans in ("q", "quit", "exit"):
+                raise SystemExit("user cancelled")
+            mapping = {"1": "claude", "claude": "claude",
+                       "2": "codex",  "codex":  "codex",
+                       "3": "gemini", "gemini": "gemini"}
+            if ans in mapping:
+                cli = mapping[ans]
+                break
+            print(f"{C_YELLOW}请选 1/2/3 或输 claude/codex/gemini{C_RESET}")
+    if cli not in _CLI_TO_DRIVER:
+        raise SystemExit(f"unknown cli '{cli}'; expect one of: {list(_CLI_TO_DRIVER)}")
+    return cli, _CLI_TO_DRIVER[cli]
+
+
 def _repair_agent_config(target_dir: str, opts: dict) -> tuple[str, str]:
     """重写 cwd/pre/agent_config.json. preserve 用户自定义 key.
 
@@ -59,9 +103,12 @@ def _repair_agent_config(target_dir: str, opts: dict) -> tuple[str, str]:
             existing = {}
         backup = _backup(cfg_path)
 
-    # preserve 用户自定义字段, 强更 driver 管的核心 4 字段
+    cli, driver_type = _resolve_driver(opts, existing)
+
+    # preserve 用户自定义字段, 强更 driver 管的核心字段
     new = dict(existing)
-    new["cli"] = "claude"
+    new["cli"] = cli
+    new["driver_type"] = driver_type
     new["mode"] = opts.get("mode") or existing.get("mode") or "supervised"
     fallback_name = os.path.basename(target_dir.rstrip("/")) or "agent"
     new["tmux_session"] = (
@@ -161,6 +208,9 @@ def main() -> int:
     )
     p.add_argument("target_dir", nargs="?", default=os.getcwd(),
                    help="agent cwd (default: current dir)")
+    p.add_argument("--driver", choices=["claude", "codex", "gemini"],
+                   default=None,
+                   help="cli driver. preserve existing cli if set; else prompt or error")
     p.add_argument("--mode", choices=["supervised", "autonomous", "freerun"],
                    default=None)
     p.add_argument("--tmux-session", default=None)
@@ -183,7 +233,7 @@ def main() -> int:
         return 1
 
     opts: dict = {}
-    for k in ("mode", "tmux_session", "project_name", "model", "role"):
+    for k in ("driver", "mode", "tmux_session", "project_name", "model", "role"):
         v = getattr(args, k)
         if v:
             opts[k] = v

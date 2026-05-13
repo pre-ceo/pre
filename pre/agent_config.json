@@ -2,5 +2,7 @@
   "mode": "supervised",
   "tmux_session": "pre",
   "project_name": "pre",
-  "role": "platform"
+  "role": "platform",
+  "driver_type": "cli-claude-code-local",
+  "cli": "claude"
 }
