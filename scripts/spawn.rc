@@ -1,0 +1,20 @@
+#!/bin/bash
+# pre spawn rc — sourced before launching cli in sys_* tmux sessions.
+#
+# 角色: pre 内置 minimal fallback. 不做地区/egress 校验.
+# 实际 user 部署的 rc 应放在 $PRE_RULE_ROOT/spawn.rc (pre_rule 是配置目录,
+# 跟 pre 平台代码分离 — 见 CLAUDE.md "用户级规则与运行时状态在 pre_rule").
+#
+# 解析优先级 (probe `_resolve_spawn_rc`):
+#   1. $PRE_SPAWN_RC
+#   2. $PRE_RULE_ROOT/spawn.rc        ← user 配置
+#   3. /root/workspace/pre_rule/spawn.rc ← 远端 fallback
+#   4. <pre>/scripts/spawn.rc            ← THIS FILE (内置 fallback)
+#   5. /root/workspace/pre/scripts/spawn.rc
+#
+# 内置 fallback 只做最基本兜底: source ~/rule.sh (加载 PATH/env). 别的逻辑
+# (代理校验 / IP 国家 / 鉴权预检) 全部 user 自己在 pre_rule/spawn.rc 写.
+
+set -u
+
+[ -f "$HOME/rule.sh" ] && source "$HOME/rule.sh"

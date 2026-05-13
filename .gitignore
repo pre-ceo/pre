@@ -1,0 +1,26 @@
+# Build / runtime
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.python-cache/
+
+# Local SQLite
+*.db
+master.db
+
+# Local config / runtime state
+config.json
+agents/
+logs/
+.claude/
+.claude/settings.local.json
+.pre/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.egg-info/
+uv.lock

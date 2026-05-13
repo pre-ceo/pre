@@ -1,0 +1,6 @@
+{
+  "mode": "supervised",
+  "tmux_session": "pre",
+  "project_name": "pre",
+  "role": "platform"
+}

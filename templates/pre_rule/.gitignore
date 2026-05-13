@@ -1,0 +1,24 @@
+# Runtime state — never commit.
+# Everything in this directory other than the layered rule files, README,
+# LICENSE, .gitignore, spawn.rc, and config.json is local-only runtime data.
+
+logs/
+agents/
+runtime/
+freerun/
+cron/
+hook/
+notify_config.json
+.env_sync_secret
+master.db
+*.db
+
+# Local launcher / scratch
+tmux_startup.sh
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+__pycache__/

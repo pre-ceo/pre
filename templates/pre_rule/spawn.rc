@@ -1,0 +1,39 @@
+#!/bin/bash
+# pre_rule/spawn.rc — user 配置层的 spawn rc (yours to edit).
+#
+# probe (pre/scripts/usage_probe_once.py::_resolve_spawn_rc) 优先用此文件;
+# 找不到时回退到 pre 内置 minimal fallback (<PRE_ROOT>/scripts/spawn.rc).
+#
+# 用途: sys_claude / sys_gemini / sys_codex tmux session spawn 前 source.
+# 在此设代理 env / 校验出口 IP / 加载 cli 鉴权 token 等.
+#
+# 修改后**无需重启 probe / master / cron** — 下次 tick (≤30s) 自动生效.
+# install.sh 不会覆盖本文件 — 改坏了想恢复模板就删掉它重跑 install.sh.
+
+set -u
+
+# ============================================================
+# 1. 加载用户级 shell 配置 (PATH / 代理 env / 鉴权 token 等)
+#    典型: ~/rule.sh 设 export PATH / HTTP_PROXY / GEMINI_API_KEY 等
+# ============================================================
+[ -f "$HOME/rule.sh" ] && source "$HOME/rule.sh"
+
+# ============================================================
+# 2. (可选) 出口 IP 校验
+#    如需保证 cli 走特定地域出口 (e.g. 公司 VPN / 国家合规), 取消下面
+#    一段的注释并把 EXPECTED_COUNTRY 改成你想要的 ISO 国家码.
+# ============================================================
+# EXPECTED_COUNTRY="JP"
+# RESP=$(curl -s --max-time 5 https://ipinfo.io/json 2>/dev/null || echo "")
+# if [ -z "$RESP" ]; then
+#   echo "[spawn.rc] WARN: ip lookup unreachable (proxy down?)"
+# else
+#   COUNTRY=$(echo "$RESP" | grep -o '"country":[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+#   IP=$(echo "$RESP" | grep -o '"ip":[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+#   echo "[spawn.rc] egress: ip=$IP country=$COUNTRY"
+#   if [ "$COUNTRY" != "$EXPECTED_COUNTRY" ]; then
+#     echo "[spawn.rc] FATAL: egress not $EXPECTED_COUNTRY (got '$COUNTRY'), abort cli start"
+#     sleep 5
+#     exit 1
+#   fi
+# fi

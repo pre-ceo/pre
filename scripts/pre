@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""pre — 统一 CLI 入口 (子命令 dispatcher).
+
+子命令:
+  init <cwd>           在指定目录初始化 claude agent (= pre_init.py)
+  migrate              迁移老 pre_rule/agents/<dir>/ 到 pointer 格式 (= pre_migrate.py)
+  spawn <id>           起 tmux session + 通知 master rediscover (= spawn_agent.sh)
+  rm <id|dir>          删除 pre_rule/agents/<dir>/ 索引 (不动 cwd)
+  list                 列所有 discover_agents 结果 + 状态
+  bus <action> [tgt]   管理 master/node/ui/cron daemon (= bus_ctl.sh):
+                       start | stop | restart | status | logs | attach | sync
+
+每个子命令支持 --help (bus 走 bus_ctl.sh, 用 `pre bus` 看 usage).
+
+shim 由 scripts/install.sh 安装到 $ARG_BIN_DIR/pre (默认 ~/.local/bin/pre).
+"""
+import argparse
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PRE_ROOT = os.path.dirname(_HERE)
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_PRE_ROOT, "src"))
+
+
+C_CYAN = "\033[36m"
+C_YELLOW = "\033[33m"
+C_BLUE = "\033[34m"
+C_MAGENTA = "\033[35m"
+C_DIM = "\033[2m"
+C_RESET = "\033[0m"
+
+
+def _cmd_init(rest):
+    import pre_init
+    sys.argv = ["pre init"] + rest
+    return pre_init.main()
+
+
+def _cmd_migrate(rest):
+    import pre_migrate
+    sys.argv = ["pre migrate"] + rest
+    return pre_migrate.main()
+
+
+def _cmd_spawn(rest):
+    spawn_sh = os.path.join(_HERE, "spawn_agent.sh")
+    return subprocess.call(["bash", spawn_sh] + rest)
+
+
+def _cmd_bus(rest):
+    bus_sh = os.path.join(_HERE, "bus_ctl.sh")
+    return subprocess.call(["bash", bus_sh] + rest)
+
+
+def _resolve_rule_root() -> str:
+    from config import RULE_ROOT
+    return os.environ.get("PRE_RULE_ROOT") or RULE_ROOT
+
+
+def _find_agent_dir(agents_dir: str, target: str):
+    """target 可以是 dir_name (Users-...) 或 agent_id (local.xxx.yyy).
+    返 (agent_pre_dir, source) 或 (None, None)."""
+    candidate = os.path.join(agents_dir, target)
+    if os.path.isdir(candidate):
+        return candidate, "dir-name"
+
+    orphan_prefix = "local.cli-claude-code-local.orphan-"
+    for name in sorted(os.listdir(agents_dir)):
+        d = os.path.join(agents_dir, name)
+        if not os.path.isdir(d):
+            continue
+        ptr = os.path.join(d, "agent_pointer.json")
+        if os.path.isfile(ptr):
+            try:
+                with open(ptr) as f:
+                    pdata = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pdata = {}
+            if pdata.get("agent_id") == target:
+                return d, "pointer"
+        elif target.startswith(orphan_prefix):
+            # orphan agent_id 的 suffix 就是 dir_name
+            if name == target[len(orphan_prefix):]:
+                return d, "orphan-id"
+    return None, None
+
+
+def _cmd_rm(rest):
+    p = argparse.ArgumentParser(
+        prog="pre rm",
+        description="Remove pre_rule/agents/<dir>/ index. Does NOT touch agent cwd.",
+    )
+    p.add_argument("target", help="agent_id (e.g. local.cli-claude-code-local.pre) "
+                                  "or dir name (e.g. Users-user-cursor-pre)")
+    p.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
+    args = p.parse_args(rest)
+
+    agents_dir = os.path.join(_resolve_rule_root(), "agents")
+    if not os.path.isdir(agents_dir):
+        print(f"{C_YELLOW}agents dir not found: {agents_dir}{C_RESET}")
+        return 1
+
+    d, source = _find_agent_dir(agents_dir, args.target)
+    if d is None:
+        print(f"{C_YELLOW}no pre_rule/agents/ entry matches '{args.target}'{C_RESET}")
+        return 1
+
+    cwd_hint = ""
+    ptr = os.path.join(d, "agent_pointer.json")
+    if os.path.isfile(ptr):
+        try:
+            with open(ptr) as f:
+                cwd_hint = json.load(f).get("cwd", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    print(f"{C_MAGENTA}━━━ pre rm ({source}) ━━━{C_RESET}")
+    print(f"{C_BLUE}target index:{C_RESET} {d}")
+    if cwd_hint:
+        print(f"{C_DIM}pointer.cwd: {cwd_hint} (NOT deleted){C_RESET}")
+    else:
+        print(f"{C_DIM}no pointer (orphan dir){C_RESET}")
+
+    if not args.yes:
+        try:
+            ans = input(f"{C_YELLOW}type 'delete' to confirm: {C_RESET}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        if ans != "delete":
+            print(f"{C_DIM}aborted{C_RESET}")
+            return 1
+
+    try:
+        shutil.rmtree(d)
+        print(f"{C_CYAN}removed {d}{C_RESET}")
+        if cwd_hint:
+            print(f"{C_DIM}note: {cwd_hint}/pre/ untouched — remove manually if you want.{C_RESET}")
+        return 0
+    except OSError as e:
+        print(f"{C_YELLOW}rm failed: {e}{C_RESET}")
+        return 1
+
+
+def _cmd_list(rest):
+    p = argparse.ArgumentParser(prog="pre list",
+                                description="List discovered agents with status.")
+    p.add_argument("--failed-only", action="store_true")
+    p.add_argument("--ok-only", action="store_true")
+    args = p.parse_args(rest)
+
+    from drivers.cli_claude_code_local.driver import CliClaudeCodeLocalDriver
+
+    async def _run():
+        drv = CliClaudeCodeLocalDriver()
+        await drv.init({"node_id": os.environ.get("PRE_NODE_ID", "local")})
+        return await drv.discover_agents()
+
+    specs = asyncio.run(_run())
+    if args.failed_only:
+        specs = [s for s in specs if s.metadata.get("status") != "ok"]
+    elif args.ok_only:
+        specs = [s for s in specs if s.metadata.get("status") == "ok"]
+
+    if not specs:
+        print(f"{C_DIM}no agents discovered{C_RESET}")
+        return 0
+
+    for s in specs:
+        st = s.metadata.get("status", "?")
+        color = C_CYAN if st == "ok" else C_YELLOW
+        print(f"{color}[{st}]{C_RESET} {s.agent_id}")
+        if st == "ok":
+            print(f"      cwd:  {s.metadata.get('cwd')}")
+            print(f"      tmux: {s.metadata.get('tmux_session')}  "
+                  f"mode: {s.metadata.get('mode')}  role: {s.role}")
+        else:
+            print(f"      reason: {s.metadata.get('failure_reason')}")
+            print(f"      hint:   {s.metadata.get('failure_hint')}")
+    return 0
+
+
+_COMMANDS = {
+    "init": _cmd_init,
+    "migrate": _cmd_migrate,
+    "spawn": _cmd_spawn,
+    "rm": _cmd_rm,
+    "list": _cmd_list,
+    "bus": _cmd_bus,
+}
+
+
+def _usage():
+    print("usage: pre <command> [args...]")
+    print()
+    print("commands:")
+    print("  init <cwd>           initialize a claude agent in cwd (idempotent)")
+    print("  migrate              migrate legacy pre_rule/agents/ to pointer format")
+    print("  spawn <id>           start tmux session for agent_id + notify master")
+    print("  rm <id|dir>          remove pre_rule/agents/<dir>/ index (cwd untouched)")
+    print("  list                 list all discovered agents with status")
+    print("  bus <action> [tgt]   manage master/node/ui/cron daemons")
+    print("                       actions: start|stop|restart|status|logs|attach|sync")
+    print()
+    print("each command supports --help (e.g. pre init --help, pre bus)")
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        _usage()
+        return 0
+    cmd = sys.argv[1]
+    rest = sys.argv[2:]
+    fn = _COMMANDS.get(cmd)
+    if not fn:
+        print(f"unknown command: {cmd}\n", file=sys.stderr)
+        _usage()
+        return 2
+    rc = fn(rest)
+    return rc if rc is not None else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

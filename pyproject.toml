@@ -1,0 +1,30 @@
+[project]
+name = "pre"
+version = "0.1.0"
+description = "Claude Code PreToolUse / Stop hook governance + multi-agent message bus + MCP server"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+
+# `mcp` is the agent-facing protocol; required because pre_mcp is the
+# primary path agents use to talk to the bus. The master, node, hooks, and
+# scripts themselves are stdlib-only and don't import mcp.
+dependencies = [
+    "mcp>=1.0",
+]
+
+[project.scripts]
+pre-mcp = "pre_mcp.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/your-github-org/pre"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "src", "src.master", "src.node", "src.drivers", "src.runtime",
+    "pre_mcp",
+]
