@@ -17,6 +17,15 @@ logs/
 .claude/settings.local.json
 .pre/
 
+# pre runtime per-project state — init/hook 在 pre 仓库自身跑时生成, 不入 git
+# (agent_config.json + rules.md 是历史 tracked, 不在此排除)
+/pre/next.md
+/pre/.done
+/pre/.next_action
+/pre/transcript_path.txt
+/pre/findings/
+/pre/reports/
+
 # OS / editor
 .DS_Store
 .idea/

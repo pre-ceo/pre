@@ -6,11 +6,15 @@
   uv run python scripts/start_master.py [--host 127.0.0.1] [--port 19500]
 
 multi-token RBAC: 不再接受 --secret. token 全在 master.db 的 bus_tokens 表.
-启动时 idempotent bootstrap: 检查 6 个 default label (node/operator/cli/mcp/gui/hook),
-缺哪个 label 补哪个. 新颁发的 raw 自动:
-  - append 到 ~/.pre/data/initial_tokens.txt (chmod 600)
-  - append 到 ~/.pre/env 对应 PRE_<KIND>_SECRET (if-not-set; chmod 600)
-  - gui-default 同时 stderr 输出 fe ui 一次性激活 magic link (token 走 URL fragment)
+启动两步:
+  1. bootstrap (idempotent) — 检查 6 个 default label (node/operator/cli/mcp/gui/hook),
+     缺哪个就 issue, raw 追加 ~/.pre/data/initial_tokens.txt (chmod 600).
+  2. env sync — 扫 initial_tokens.txt, 把所有 default label 的 raw 同步到 ~/.pre/env
+     对应 PRE_<KIND>_SECRET (only if-key-not-set). 即使 db 已 bootstrap 过但 env 缺
+     PRE_GUI_SECRET 也能补 + 显 magic link (升级路径).
+
+新颁发或新同步 gui-default 时, stderr 输出 fe ui 一次性激活 magic link
+(token 走 URL fragment, 不进 server log).
 
 旧 PRE_SECRET / PRE_NODE_SECRET env 一律忽略.
 """
@@ -52,51 +56,11 @@ def _magic_link(gui_raw: str) -> str:
     return f"{base}#token={gui_raw}&next=/"
 
 
-def _write_secrets_to_env(issued: list[tuple[str, str]]) -> list[str]:
-    """新颁发的 token 写到 ~/.pre/env. 已设的 KEY 不覆盖. 返写入的 env key 列表."""
-    env_file = Path.home() / ".pre" / "env"
-    env_file.parent.mkdir(parents=True, exist_ok=True)
-
-    existing_text = ""
-    if env_file.exists():
-        try:
-            existing_text = env_file.read_text(encoding="utf-8")
-        except OSError:
-            existing_text = ""
-
-    existing_lines = existing_text.split("\n")
-    appended_keys: list[str] = []
-    appends: list[str] = []
-    for label, raw in issued:
-        env_key = _LABEL_TO_ENV_KEY.get(label)
-        if not env_key:
-            continue  # cli-default 跳过
-        # 检测 KEY= line start (允许前置空白)
-        if any(line.lstrip().startswith(f"{env_key}=") for line in existing_lines):
-            continue
-        appends.append(f"{env_key}={raw}  # auto-set by start_master ({label})")
-        appended_keys.append(env_key)
-
-    if not appends:
-        return []
-
-    with open(env_file, "a", encoding="utf-8") as f:
-        if not existing_text.endswith("\n") and existing_text:
-            f.write("\n")
-        f.write("# auto-injected default tokens (bootstrap idempotent)\n")
-        f.write("\n".join(appends) + "\n")
-    try:
-        os.chmod(env_file, 0o600)
-    except OSError:
-        pass
-    return appended_keys
-
-
 def _bootstrap_tokens(db: MasterDB, db_path: str) -> list[tuple[str, str]]:
     """Idempotent bootstrap: 检查 6 个 default label 在不在 db, 缺哪个补哪个.
 
     返本次新颁发的 [(label, raw)] 列表 (空 = 全 6 都已存在).
-    新 raw 写到 initial_tokens.txt (append) + ~/.pre/env (if-key-not-set).
+    新 raw append 到 initial_tokens.txt; env sync 由 _sync_env_from_initial_tokens 统一处理.
     """
     defaults = [
         ("node-default",     "node",     None),
@@ -136,7 +100,7 @@ def _bootstrap_tokens(db: MasterDB, db_path: str) -> list[tuple[str, str]]:
             f.write(
                 "# pre master initial bus_tokens — DELETE AFTER YOU CONFIGURED CLIENTS\n"
                 "# Idempotent: master 启动检查缺失 default label 并补齐.\n"
-                "# 启动还会 append 到 ~/.pre/env 对应 PRE_<KIND>_SECRET (if-not-set).\n"
+                "# 启动还会 sync 到 ~/.pre/env 对应 PRE_<KIND>_SECRET (if-not-set).\n"
                 "# Use scripts/pre_token.py issue ... 给特定 agent / 来源发更细粒度 token.\n\n"
             )
         for label, raw in issued:
@@ -146,10 +110,81 @@ def _bootstrap_tokens(db: MasterDB, db_path: str) -> list[tuple[str, str]]:
     except OSError:
         pass
 
-    # 回写 ~/.pre/env (if-key-not-set)
-    _write_secrets_to_env(issued)
-
     return issued
+
+
+def _sync_env_from_initial_tokens(db_path: str) -> list[tuple[str, str]]:
+    """读 initial_tokens.txt 全部 default label, 跟 ~/.pre/env 比, 缺的 PRE_<KIND>_SECRET 补.
+
+    返本次 append 到 env 的 [(env_key, raw)] 列表.
+    用途: 升级路径 — db 已 bootstrap 但 env 从未 sync 时, 自动补齐 + 重显 gui magic link.
+    """
+    init_file = Path(db_path).parent / "initial_tokens.txt"
+    if not init_file.exists():
+        return []
+
+    env_file = Path.home() / ".pre" / "env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    existing_env = ""
+    if env_file.exists():
+        try:
+            existing_env = env_file.read_text(encoding="utf-8")
+        except OSError:
+            existing_env = ""
+    existing_lines = existing_env.split("\n")
+
+    # parse initial_tokens.txt → {label: raw}
+    label_to_raw: dict[str, str] = {}
+    try:
+        for line in init_file.read_text(encoding="utf-8").split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            label, _, raw = line.partition("=")
+            label = label.strip()
+            raw = raw.strip()
+            if label and raw:
+                label_to_raw[label] = raw
+    except OSError:
+        return []
+
+    synced: list[tuple[str, str]] = []
+    appends: list[str] = []
+    for label, env_key in _LABEL_TO_ENV_KEY.items():
+        if label not in label_to_raw:
+            continue
+        if any(line.lstrip().startswith(f"{env_key}=") for line in existing_lines):
+            continue
+        appends.append(f"{env_key}={label_to_raw[label]}  # synced from initial_tokens.txt ({label})")
+        synced.append((env_key, label_to_raw[label]))
+
+    if not appends:
+        return []
+
+    with open(env_file, "a", encoding="utf-8") as f:
+        if existing_env and not existing_env.endswith("\n"):
+            f.write("\n")
+        f.write("# synced from initial_tokens.txt (bootstrap default labels)\n")
+        f.write("\n".join(appends) + "\n")
+    try:
+        os.chmod(env_file, 0o600)
+    except OSError:
+        pass
+    return synced
+
+
+def _print_magic_link(gui_raw: str):
+    link = _magic_link(gui_raw)
+    print(file=sys.stderr)
+    print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}",
+          file=sys.stderr)
+    print(f"{C_CYAN}  FE UI 一次性激活链接 (浏览器打开 → 自动保存 token → 跳 /):{C_RESET}",
+          file=sys.stderr)
+    print(f"{C_CYAN}  {link}{C_RESET}", file=sys.stderr)
+    print(f"{C_CYAN}  (失去重发: pre_token.py rotate --label gui-default){C_RESET}",
+          file=sys.stderr)
+    print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}",
+          file=sys.stderr)
 
 
 def main():
@@ -182,36 +217,37 @@ def main():
     # bootstrap (idempotent — 缺哪个 default label 补哪个)
     db = MasterDB(args.db)
     issued = _bootstrap_tokens(db, args.db)
+    db.conn.close()  # 让 run_master 自己重新打开 (避免共享 connection)
+
+    # env sync (扫 initial_tokens.txt 补 env 缺的 PRE_<KIND>_SECRET)
+    synced = _sync_env_from_initial_tokens(args.db)
+
     if issued:
         init_file = str(Path(args.db).parent / "initial_tokens.txt")
-        env_file = str(Path.home() / ".pre" / "env")
         print(f"{C_MAGENTA}[master] ━━━ bootstrap: {len(issued)} new default token(s) issued ━━━{C_RESET}",
               file=sys.stderr)
         print(f"{C_MAGENTA}[master] appended to {init_file} (chmod 600){C_RESET}",
               file=sys.stderr)
-        print(f"{C_MAGENTA}[master] appended to {env_file} as PRE_<KIND>_SECRET (if-not-set){C_RESET}",
-              file=sys.stderr)
         for label, raw in issued:
             print(f"{C_BLUE}[master]   {label:18s}  {raw}{C_RESET}", file=sys.stderr)
 
-        # GUI token magic link — fragment 不进 server log, fe ui 入口自动 localStorage 落地
-        gui_raw = next((raw for lb, raw in issued if lb == "gui-default"), None)
-        if gui_raw:
-            link = _magic_link(gui_raw)
-            print(file=sys.stderr)
-            print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}",
-                  file=sys.stderr)
-            print(f"{C_CYAN}  FE UI 一次性激活链接 (浏览器打开 → 自动保存 token → 跳 /):{C_RESET}",
-                  file=sys.stderr)
-            print(f"{C_CYAN}  {link}{C_RESET}", file=sys.stderr)
-            print(f"{C_CYAN}  (仅本次显示; 失去重发: pre_token.py rotate --label gui-default){C_RESET}",
-                  file=sys.stderr)
-            print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}",
-                  file=sys.stderr)
-
-        print(f"{C_CYAN}[master] 后续管理用 `python3 scripts/pre_token.py issue/list/revoke/rotate`{C_RESET}",
+    if synced:
+        env_file = str(Path.home() / ".pre" / "env")
+        print(f"{C_MAGENTA}[master] ━━━ env sync: {len(synced)} PRE_<KIND>_SECRET appended to {env_file} ━━━{C_RESET}",
               file=sys.stderr)
-    db.conn.close()  # 让 run_master 自己重新打开 (避免共享 connection)
+        for env_key, _raw in synced:
+            print(f"{C_BLUE}[master]   {env_key}{C_RESET}", file=sys.stderr)
+
+    # magic link: 优先 issued gui (新颁发), 否则 synced gui (db 已有但 env 刚补)
+    gui_raw = next((raw for lb, raw in issued if lb == "gui-default"), None)
+    if not gui_raw:
+        gui_raw = next((raw for k, raw in synced if k == "PRE_GUI_SECRET"), None)
+    if gui_raw:
+        _print_magic_link(gui_raw)
+
+    if issued or synced:
+        print(f"{C_CYAN}[master] 后续 token 管理用 `python3 scripts/pre_token.py issue/list/revoke/rotate`{C_RESET}",
+              file=sys.stderr)
 
     # secret 参数已废弃, 传空字符串 (server.py 里 _check_auth 不读)
     try:
