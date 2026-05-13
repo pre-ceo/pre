@@ -114,11 +114,15 @@ def _refresh_mcp() -> int:
         if not shutil.which(cli):
             print(f"{C_DIM}[skip]{C_RESET}  {cli} not installed")
             continue
-        subprocess.run([cli, "mcp", "remove", "pre"],
-                       capture_output=True, text=True)  # 老 entry 删, 不 fail
-        # gemini cli 不认 `--` 分隔符, 三 cli 统一 positional 写法
-        r = subprocess.run([cli, "mcp", "add", "pre", shim],
-                           capture_output=True, text=True)
+        # gemini cli 默认 scope=project 会写到 cwd .gemini/settings.json, 必须显式 user
+        if cli == "gemini":
+            rm_args = [cli, "mcp", "remove", "--scope", "user", "pre"]
+            add_args = [cli, "mcp", "add", "--scope", "user", "pre", shim]
+        else:
+            rm_args = [cli, "mcp", "remove", "pre"]
+            add_args = [cli, "mcp", "add", "pre", shim]
+        subprocess.run(rm_args, capture_output=True, text=True)  # 老 entry 删, 不 fail
+        r = subprocess.run(add_args, capture_output=True, text=True)
         if r.returncode == 0:
             print(f"{C_CYAN}[ok]{C_RESET}    {cli}    -> {shim}")
         else:

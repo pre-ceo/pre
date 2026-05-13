@@ -33,3 +33,4 @@ logs/
 *.swp
 *.egg-info/
 uv.lock
+.gemini/
