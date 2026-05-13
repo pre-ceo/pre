@@ -238,20 +238,22 @@ for entry in "pre:pre" "pre-tool-use:pre_tool_use.py" "pre-stop-hook:stop_hook.p
 #!/usr/bin/env bash
 # pre shim — installed by scripts/install.sh.
 # Source ~/.pre/env for PRE_ROOT. mv pre 仓库后重跑 install.sh, shim 自动 follow.
-. "\$HOME/.pre/env"
+# set -a 让 KEY=value 行 source 后自动 export, 子进程 (exec ...) 才继承.
+set -a; . "\$HOME/.pre/env"; set +a
 exec python3 "\$PRE_ROOT/scripts/$script" "\$@"
 SHIM
     chmod 755 "$shim_path"
 done
 
-# pre-mcp shim — mcp server 入口. 跟其他 shim 同模式 (先 source ~/.pre/env),
+# pre-mcp shim — mcp server 入口. 跟其他 shim 同模式 (set -a source ~/.pre/env),
 # 但启动的是 `uv run -m pre_mcp` 模块不是 .py script, 模板不同所以单独装.
 # 配 ~/.claude.json + codex + gemini mcp config 时 command 都指这个 shim,
 # token (PRE_MCP_SECRET) 不写进 cli config, 轮换只改 ~/.pre/env.
 cat > "$ARG_BIN_DIR/pre-mcp" <<SHIM
 #!/usr/bin/env bash
 # pre-mcp shim — installed by scripts/install.sh.
-. "\$HOME/.pre/env"
+# set -a 让 PRE_MCP_SECRET 等 KEY=value 行被 export, 子进程才能 inherit.
+set -a; . "\$HOME/.pre/env"; set +a
 exec uv run --directory "\$PRE_ROOT" python -m pre_mcp "\$@"
 SHIM
 chmod 755 "$ARG_BIN_DIR/pre-mcp"
