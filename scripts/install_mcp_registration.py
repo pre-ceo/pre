@@ -32,14 +32,16 @@ def _ts() -> str:
 
 
 def _template(pre_root: str) -> dict:
-    """生成 mcpServers.pre 的标准注册块."""
+    """生成 mcpServers.pre 的标准注册块.
+
+    用 ~/.local/bin/pre-mcp shim. shim 自己 source ~/.pre/env 注入
+    PRE_MCP_SECRET + PRE_ROOT, 不写 raw token 进 ~/.claude.json. Token
+    轮换 = 改 ~/.pre/env 一处, 不动 claude/codex/gemini config.
+    """
+    shim = os.path.join(os.path.expanduser("~"), ".local", "bin", "pre-mcp")
     return {
-        "command": "uv",
-        "args": [
-            "run",
-            "--directory", pre_root,
-            "python", "-m", "pre_mcp",
-        ],
+        "command": shim,
+        "args": [],
         "env": {
             "PRE_MASTER_URL": "http://127.0.0.1:19500",
             "PRE_NODE_ID": "local",

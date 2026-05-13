@@ -187,16 +187,37 @@ fi
 
 # === ~/.claude.json MCP 注册 ===
 MCP_STATUS="skipped"
+CODEX_MCP_STATUS="skipped"
+GEMINI_MCP_STATUS="skipped"
 if [ "$ARG_NO_MCP" -eq 1 ]; then
     MCP_STATUS="skipped (--no-mcp)"
+    CODEX_MCP_STATUS="skipped (--no-mcp)"
+    GEMINI_MCP_STATUS="skipped (--no-mcp)"
 else
     echo
     echo "─── MCP registration ($HOME/.claude.json) ───"
     if python3 "$PRE_ROOT/scripts/install_mcp_registration.py" --pre-root "$PRE_ROOT"; then
-        MCP_STATUS="registered mcpServers.pre"
+        MCP_STATUS="registered mcpServers.pre -> $ARG_BIN_DIR/pre-mcp"
     else
         MCP_STATUS="failed (see error above; you can add mcpServers.pre by hand)"
     fi
+
+    # codex / gemini mcp 注册. shim 入口同 ~/.claude.json — 三 cli 一致.
+    # cli 没装 → skip 不 fail.
+    for cli in codex gemini; do
+        if ! command -v "$cli" >/dev/null 2>&1; then
+            eval "${cli^^}_MCP_STATUS=\"skipped ($cli not installed)\""
+            continue
+        fi
+        echo "─── $cli mcp register ───"
+        # 老 entry (任意 path) 删了, 重 add 指 shim
+        "$cli" mcp remove pre 2>/dev/null || true
+        if "$cli" mcp add pre -- "$ARG_BIN_DIR/pre-mcp" 2>&1; then
+            eval "${cli^^}_MCP_STATUS=\"registered $cli mcp pre -> $ARG_BIN_DIR/pre-mcp\""
+        else
+            eval "${cli^^}_MCP_STATUS=\"failed (see error above)\""
+        fi
+    done
 fi
 
 # === 装 shim ===
@@ -215,6 +236,18 @@ SHIM
     chmod 755 "$shim_path"
 done
 
+# pre-mcp shim — mcp server 入口. 跟其他 shim 同模式 (先 source ~/.pre/env),
+# 但启动的是 `uv run -m pre_mcp` 模块不是 .py script, 模板不同所以单独装.
+# 配 ~/.claude.json + codex + gemini mcp config 时 command 都指这个 shim,
+# token (PRE_MCP_SECRET) 不写进 cli config, 轮换只改 ~/.pre/env.
+cat > "$ARG_BIN_DIR/pre-mcp" <<SHIM
+#!/usr/bin/env bash
+# pre-mcp shim — installed by scripts/install.sh.
+. "\$HOME/.pre/env"
+exec uv run --directory "\$PRE_ROOT" python -m pre_mcp "\$@"
+SHIM
+chmod 755 "$ARG_BIN_DIR/pre-mcp"
+
 # === PATH check ===
 case ":$PATH:" in
     *":$ARG_BIN_DIR:"*) PATH_OK=1 ;;
@@ -230,9 +263,13 @@ cat <<EOF
   PRE_LOG_DIR   = $PRE_LOG_DIR  (from $SRC_LOG)
   env file      = $ENV_FILE  (chmod 600)
   user rc       = $RC_FILE_PRE  ($RC_STATUS — proxy / PATH / nvm 等可执行 init)
-  shim dir      = $ARG_BIN_DIR  (pre, pre-tool-use, pre-stop-hook)
+  shim dir      = $ARG_BIN_DIR  (pre, pre-tool-use, pre-stop-hook, pre-mcp)
   pre_ui        = $PRE_UI_STATUS
-  MCP           = $MCP_STATUS
+  MCP claude    = $MCP_STATUS
+  MCP codex     = $CODEX_MCP_STATUS
+  MCP gemini    = $GEMINI_MCP_STATUS
+
+  注: cli mcp 子进程 long-lived, 装/改完必须重启 agent (/quit + exec <cli>) 才生效.
 
 optional:
   编辑 $RC_FILE_PRE 加代理 / PATH / nvm 等 — bus_ctl.sh 和 agent tmux 启动时 source.

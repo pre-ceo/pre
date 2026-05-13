@@ -91,6 +91,42 @@ def _bus_restart() -> int:
     return subprocess.call(["bash", bus_sh, "restart"])
 
 
+def _refresh_mcp() -> int:
+    """重 register pre mcp shim 给 claude/codex/gemini. mv repo / 升级后必跑,
+    确保各 cli 的 mcp config command 指当前 PRE_ROOT 的 ~/.local/bin/pre-mcp shim.
+    cli 没装 → skip 不 fail. mcp 子进程 long-lived, agent 需重启才生效."""
+    print(f"\n{C_MAGENTA}━━━ refresh mcp registration ━━━{C_RESET}")
+    shim = os.path.expanduser("~/.local/bin/pre-mcp")
+    if not os.path.isfile(shim):
+        print(f"{C_YELLOW}shim {shim} 不存在 — 先跑 scripts/install.sh{C_RESET}")
+        return 1
+    # claude: 走 install_mcp_registration.py (~/.claude.json diff+overwrite)
+    reg_py = os.path.join(_HERE, "install_mcp_registration.py")
+    if os.path.isfile(reg_py):
+        rc = subprocess.call(["python3", reg_py, "--pre-root", _PRE_ROOT])
+        if rc == 0:
+            print(f"{C_CYAN}[ok]{C_RESET}    claude  -> {shim}")
+        else:
+            print(f"{C_YELLOW}[warn]{C_RESET} claude register rc={rc}")
+    # codex / gemini: 走各自 cli mcp 子命令
+    import shutil
+    for cli in ("codex", "gemini"):
+        if not shutil.which(cli):
+            print(f"{C_DIM}[skip]{C_RESET}  {cli} not installed")
+            continue
+        subprocess.run([cli, "mcp", "remove", "pre"],
+                       capture_output=True, text=True)  # 老 entry 删, 不 fail
+        r = subprocess.run([cli, "mcp", "add", "pre", "--", shim],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"{C_CYAN}[ok]{C_RESET}    {cli}    -> {shim}")
+        else:
+            print(f"{C_YELLOW}[warn]{C_RESET} {cli} register failed: "
+                  f"{(r.stderr or r.stdout).strip()[:200]}")
+    print(f"{C_DIM}注: mcp 子进程 long-lived, agent 需 /quit + exec 重启才生效{C_RESET}")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         prog="pre update",
@@ -104,6 +140,8 @@ def main() -> int:
                    help="skip uv sync in pre")
     p.add_argument("--no-restart", action="store_true",
                    help="skip pre bus restart (daemon keeps running old code)")
+    p.add_argument("--no-mcp-refresh", action="store_true",
+                   help="skip refresh mcp registration in claude/codex/gemini")
     args = p.parse_args()
 
     pre_repo = _PRE_ROOT
@@ -127,6 +165,9 @@ def main() -> int:
     if not args.no_sync:
         if _uv_sync(pre_repo) != 0:
             return 1
+
+    if not args.no_mcp_refresh:
+        _refresh_mcp()  # 失败不阻 bus restart, 仅打 warn
 
     if not args.no_restart:
         if _bus_restart() != 0:
