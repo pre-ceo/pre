@@ -6,12 +6,14 @@
   uv run python scripts/start_master.py [--host 127.0.0.1] [--port 19500]
 
 multi-token RBAC: 不再接受 --secret. token 全在 master.db 的 bus_tokens 表.
-启动两步:
-  1. bootstrap (idempotent) — 检查 6 个 default label (node/operator/cli/mcp/gui/hook),
+启动三步 (都 idempotent):
+  1. bootstrap — 检查 6 个 default label (node/operator/cli/mcp/gui/hook),
      缺哪个就 issue, raw 追加 ~/.pre/data/initial_tokens.txt (chmod 600).
-  2. env sync — 扫 initial_tokens.txt, 把所有 default label 的 raw 同步到 ~/.pre/env
-     对应 PRE_<KIND>_SECRET (only if-key-not-set). 即使 db 已 bootstrap 过但 env 缺
-     PRE_GUI_SECRET 也能补 + 显 magic link (升级路径).
+  2. env sync — 扫 initial_tokens.txt, 把 default label 的 raw 同步到 ~/.pre/env
+     对应 PRE_<KIND>_SECRET (only if-key-not-set). 升级路径自动 surface PRE_GUI_SECRET.
+  3. capability sync — 算 6 default 的 sha256[:12] 写到
+     pre_rule/hook/read_pane_capability.json 的 allow (没文件就建). fresh 机器
+     fe ui 调 sse-ticket / read_pane 不被默认 deny.
 
 新颁发或新同步 gui-default 时, stderr 输出 fe ui 一次性激活 magic link
 (token 走 URL fragment, 不进 server log).
@@ -173,6 +175,107 @@ def _sync_env_from_initial_tokens(db_path: str) -> list[tuple[str, str]]:
     return synced
 
 
+def _sync_capability_from_initial_tokens(db_path: str) -> list[str]:
+    """Idempotent: 算 initial_tokens.txt 6 个 default label 的 sha256[:12],
+    同步到 pre_rule/hook/read_pane_capability.json 的 allow 列表 (用户可手编加条目).
+
+    fresh 机器文件不存在 → 创建; 已存在但缺某 default 的 caller hash → 补 (不删用户加的).
+    返本次新加的 label 列表 (空 = 都已在).
+    用途: fe ui (gui-default) / 跨 token caller 调 sse-ticket 等 read_pane endpoint 不被默认 deny.
+    """
+    import hashlib
+    import json as _json
+
+    init_file = Path(db_path).parent / "initial_tokens.txt"
+    if not init_file.exists():
+        return []
+
+    rule_root = os.environ.get("PRE_RULE_ROOT")
+    if not rule_root:
+        return []
+    cap_path = Path(rule_root) / "hook" / "read_pane_capability.json"
+    cap_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # parse initial_tokens.txt → {label: raw}
+    label_to_raw: dict[str, str] = {}
+    try:
+        for line in init_file.read_text(encoding="utf-8").split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            label, _, raw = line.partition("=")
+            label_to_raw[label.strip()] = raw.strip()
+    except OSError:
+        return []
+
+    # 6 default → reason map (其他 label e.g. rotate 后的 gui-default.<ts> 不在这里, 用户自己 capability)
+    label_reasons = {
+        "node-default":     "node-default token (node daemon)",
+        "operator-default": "operator-default token (admin / browser GUI ops)",
+        "cli-default":      "cli-default token (legacy one-shot CLI)",
+        "mcp-default":      "mcp-default token (pre_mcp child process)",
+        "gui-default":      "gui-default token (pre_ui browser)",
+        "hook-default":     "hook-default token (hook/runtime modules)",
+    }
+
+    # 算 hash (跟 master server.py _check_auth 一致: sha256("Bearer <raw>")[:12])
+    label_hashes: list[tuple[str, str]] = []
+    for label in label_reasons:
+        raw = label_to_raw.get(label)
+        if not raw:
+            continue
+        h = hashlib.sha256(f"Bearer {raw}".encode("utf-8")).hexdigest()[:12]
+        label_hashes.append((label, h))
+
+    if not label_hashes:
+        return []
+
+    # load existing capability.json (or fresh)
+    existing: dict
+    if cap_path.exists():
+        try:
+            existing = _json.loads(cap_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except (OSError, _json.JSONDecodeError):
+            existing = {}
+    else:
+        existing = {}
+
+    existing.setdefault("version", 1)
+    existing.setdefault("default", "deny")
+    existing.setdefault("allow", [])
+    existing.setdefault("deny", [])
+
+    existing_callers = {
+        entry.get("caller")
+        for entry in existing["allow"]
+        if isinstance(entry, dict) and entry.get("caller")
+    }
+
+    added: list[str] = []
+    for label, hash_ in label_hashes:
+        if hash_ in existing_callers:
+            continue
+        existing["allow"].append({
+            "caller": hash_,
+            "target": "local.*",
+            "reason": label_reasons[label],
+        })
+        added.append(label)
+
+    if not added:
+        return []
+
+    cap_path.write_text(_json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
+                         encoding="utf-8")
+    try:
+        os.chmod(cap_path, 0o600)
+    except OSError:
+        pass
+    return added
+
+
 def _print_magic_link(gui_raw: str):
     link = _magic_link(gui_raw)
     print(file=sys.stderr)
@@ -222,6 +325,9 @@ def main():
     # env sync (扫 initial_tokens.txt 补 env 缺的 PRE_<KIND>_SECRET)
     synced = _sync_env_from_initial_tokens(args.db)
 
+    # capability sync (写 pre_rule/hook/read_pane_capability.json 让 default token 通过 ACL)
+    synced_cap = _sync_capability_from_initial_tokens(args.db)
+
     if issued:
         init_file = str(Path(args.db).parent / "initial_tokens.txt")
         print(f"{C_MAGENTA}[master] ━━━ bootstrap: {len(issued)} new default token(s) issued ━━━{C_RESET}",
@@ -238,6 +344,14 @@ def main():
         for env_key, _raw in synced:
             print(f"{C_BLUE}[master]   {env_key}{C_RESET}", file=sys.stderr)
 
+    if synced_cap:
+        rule_root = os.environ.get("PRE_RULE_ROOT", "<PRE_RULE_ROOT>")
+        cap_file = str(Path(rule_root) / "hook" / "read_pane_capability.json")
+        print(f"{C_MAGENTA}[master] ━━━ capability sync: {len(synced_cap)} default token(s) allow'd in {cap_file} ━━━{C_RESET}",
+              file=sys.stderr)
+        for label in synced_cap:
+            print(f"{C_BLUE}[master]   {label}{C_RESET}", file=sys.stderr)
+
     # magic link: 优先 issued gui (新颁发), 否则 synced gui (db 已有但 env 刚补)
     gui_raw = next((raw for lb, raw in issued if lb == "gui-default"), None)
     if not gui_raw:
@@ -245,7 +359,7 @@ def main():
     if gui_raw:
         _print_magic_link(gui_raw)
 
-    if issued or synced:
+    if issued or synced or synced_cap:
         print(f"{C_CYAN}[master] 后续 token 管理用 `python3 scripts/pre_token.py issue/list/revoke/rotate`{C_RESET}",
               file=sys.stderr)
 
