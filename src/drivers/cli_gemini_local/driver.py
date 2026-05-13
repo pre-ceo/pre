@@ -1,17 +1,22 @@
-"""cli-codex-local driver — 接 Codex agent 到 pre bus.
+"""cli-gemini-local driver — 接 Gemini CLI agent 到 pre bus.
 
-发现规则: 扫 pre_rule/agents/{Users-user-cursor-xxx}/, 反推 cwd, 读
-{cwd}/pre/agent_config.json, 只收 cli == "codex".
-agent_id: <node_id>.cli-codex-local.<project_name>
+发现规则: 扫 pre_rule/agents/<dir>/agent_pointer.json, pointer.cli == "gemini".
+agent_id: <node_id>.cli-gemini-local.<project_name>
 
-detect_pending 内嵌 evaluator + auto allow/deny + audit log.
+**架构跟 codex driver 对齐, 不走 hook 路径**:
+  - Gemini 原生有 hook (BeforeTool/AfterAgent), 但 hook decision schema 只支持
+    allow/deny 二态, 没有 ask. 真要实现 ask 必须 driver pane scrape.
+  - 既然 ask 必须走 pane scrape, 干脆 allow/deny 也走同一路径, 整套设计跟 codex
+    一致, 简化 mental model.
+  - Gemini 跑在 default approval-mode 下, 工具调用会弹原生 approval UI
+    ("Allow execution of [<tool>]?"), driver detect_pending 抓这个 UI →
+    内嵌 evaluator 决策 → 自动注 "1" allow / "Esc" reject / 上报 ask 给 user.
 """
 from __future__ import annotations
 import json
 import os
 import sys
 
-# 复用现有 pre 模块
 _PRE_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
@@ -19,33 +24,47 @@ sys.path.insert(0, os.path.join(_PRE_ROOT, "src"))
 
 import hashlib
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Optional
-from common.paths import PRE_LOG_ROOT, PRE_AGENT_HOME
+from common.paths import PRE_LOG_ROOT
 
 from drivers.base import BaseDriver, AgentSpec, InitResult
 from tmux_helper import send_to_tmux, send_key, capture_pane, has_session
 
-from .pending_parser import CodexPending, parse_codex_pending
+from .pending_parser import GeminiPending, parse_gemini_pending
 
 
-# Codex TUI busy markers — 跟 Claude 完全不同 (没有 Simmering/esc to interrupt)
+# Gemini TUI markers (实测 gemini-cli v0.42 idle/busy pane).
+# Busy 状态候选 spinner / "Thinking" 待 fixture 校准.
 _BUSY_MARKERS = (
-    "• Working",
-    "• Loading",
-    "Streaming",
-    "Thinking…",
-    "Thinking ",
-    "Generating…",
+    "Loading",
+    "Thinking",
+    "Generating",
+    "Running",
+    "⠋",  # spinner chars (待 fixture 验证)
+    "⠙",
+    "⠹",
+    "⠸",
+    "⠼",
+    "⠴",
+    "⠦",
+    "⠧",
+    "⠇",
+    "⠏",
 )
-# Codex idle 锚点 (回到 prompt + status 行)
+# Gemini idle 锚点 (回到 prompt) — 实测 v0.42 idle pane.
+# 强锚点: " > Type your message or @path/to/file" 是 idle input box hint.
+# "? for shortcuts" + "Shift+Tab to accept edits" 是 idle footer.
 _IDLE_MARKERS = (
-    " tab to queue message",
-    " context left",
-    "› ",
+    "Type your message",
+    "? for shortcuts",
+    "Shift+Tab to accept edits",
 )
+# Gemini chat marker: 用户消息 " > ..." (history block 中);
+# gemini 回应前缀 "✦" (U+2726).
+_CHAT_USER_PREFIX = " > "
+_CHAT_BOT_PREFIX = "✦"
 
 
 def _is_pane_busy(pane: str) -> bool:
@@ -55,12 +74,11 @@ def _is_pane_busy(pane: str) -> bool:
 
 
 def _has_idle_anchor(pane: str) -> bool:
-    """tail 8 行内是否有 idle 锚点 (回到 prompt)."""
+    """tail 8 行内是否有 idle 锚点."""
     tail = "\n".join(pane.splitlines()[-8:])
     return any(m in tail for m in _IDLE_MARKERS)
 
 
-# 网络探测复用 Claude driver 的 cache (避免每个 cwd 都探一遍)
 def _probe_network_cached(cwd: str) -> Optional[dict]:
     """复用 Claude driver 的 _probe_network_cached (同 cache, 30min TTL)."""
     try:
@@ -70,101 +88,72 @@ def _probe_network_cached(cwd: str) -> Optional[dict]:
         return None
 
 
-def _extract_codex_llm_route(cwd: str) -> Optional[dict]:
-    """读 ~/.codex/config.toml + ~/.codex/auth.json 抽 codex 鉴权 / 路由.
 
-    codex 配置是**全局**的 (没有目录覆盖语义), 所以 scope=global. 跟 claude 的
-    目录级 `.claude/settings.json` 区分开.
 
-    返回字段 (任一非默认才返 dict, 全默认返 None):
-      - model: str | None (e.g. "gpt-5.5"); 显式配置才有, 用 default 不写时为 None
-      - model_provider: str | None (e.g. "openai")
-      - base_url: str | None ([model_providers.<provider>] 块内的 base_url)
-      - has_api_key: bool (config.toml provider 块有 api_key 字段, 或 OPENAI_API_KEY env)
-      - has_oauth: bool (~/.codex/auth.json 存在 — ChatGPT 账号登录)
+def _extract_gemini_llm_route(cwd: str) -> Optional[dict]:
+    """读 ~/.gemini/settings.json 抽 gemini 配置.
+
+    Gemini settings.json (实测):
+      { "security": { "auth": { "selectedType": "oauth-personal" } },
+        "ui": { "theme": "..." } }
+
+    auth.selectedType 可能值:
+      - "oauth-personal" (Google account OAuth)
+      - "vertex-ai" (Cloud Vertex AI key)
+      - "gemini-api-key" (Generative Language API key)
+      - "ml-dev-server"
+
+    scope=global (gemini settings 是全局的; 也支持 cwd/.gemini/settings.json
+    项目覆盖, 但本函数先只读全局, fixture 验证后再扩 dual-source).
+
+    返回字段:
+      - auth_type: str | None
+      - has_oauth: bool (selectedType=oauth-personal)
+      - has_api_key: bool (gemini-api-key / 环境 GEMINI_API_KEY/GOOGLE_API_KEY)
       - source: list[str]
-      - scope: "global" (固定)
-
-    敏感值不入 metadata, 只标 has_*=True. ChatGPT OAuth 是 codex 默认推荐方式
-    (运行时 pane footer 显示 model + cwd, 但 fs 上不写 explicit model).
+      - scope: "global"
     """
-    config_path = os.path.expanduser("~/.codex/config.toml")
-    auth_path = os.path.expanduser("~/.codex/auth.json")
-    has_oauth = os.path.isfile(auth_path)
-
+    config_path = os.path.expanduser("~/.gemini/settings.json")
     if not os.path.isfile(config_path):
-        # 没 config 但可能有 auth (OAuth-only) 或 env API key
-        has_api_key = bool(os.environ.get("OPENAI_API_KEY"))
-        if has_oauth or has_api_key:
-            sources = []
-            if has_oauth:
-                sources.append(auth_path)
-            if has_api_key:
-                sources.append("env:OPENAI_API_KEY")
+        if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
             return {
-                "model": None,
-                "model_provider": None,
-                "base_url": None,
-                "has_api_key": has_api_key,
-                "has_oauth": has_oauth,
-                "source": sources,
+                "auth_type": None,
+                "has_oauth": False,
+                "has_api_key": True,
+                "source": ["env:GEMINI_API_KEY/GOOGLE_API_KEY"],
                 "scope": "global",
             }
         return None
 
     try:
-        import tomllib  # Python 3.11+
-    except ImportError:
+        with open(config_path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
         return None
 
-    try:
-        with open(config_path, "rb") as f:
-            doc = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
-        # config.toml 损坏不阻塞: 仍按 OAuth-only 返
-        if has_oauth:
-            return {
-                "model": None, "model_provider": None, "base_url": None,
-                "has_api_key": False, "has_oauth": True,
-                "source": [auth_path], "scope": "global",
-            }
+    auth = (doc.get("security") or {}).get("auth") or {}
+    auth_type = auth.get("selectedType") or None
+
+    has_oauth = auth_type == "oauth-personal"
+    has_api_key = auth_type == "gemini-api-key" or bool(
+        os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    )
+
+    if not (auth_type or has_oauth or has_api_key):
         return None
-
-    model = doc.get("model") or None
-    model_provider = doc.get("model_provider") or None
-    base_url = None
-    has_api_key = False
-    if model_provider:
-        providers = doc.get("model_providers") or {}
-        prov = providers.get(model_provider) if isinstance(providers, dict) else None
-        if isinstance(prov, dict):
-            base_url = prov.get("base_url") or None
-            if prov.get("api_key"):
-                has_api_key = True
-    if not has_api_key and os.environ.get("OPENAI_API_KEY"):
-        has_api_key = True
-
-    if not (model or model_provider or base_url or has_api_key or has_oauth):
-        return None
-
-    sources = [config_path]
-    if has_oauth:
-        sources.append(auth_path)
 
     return {
-        "model": model,
-        "model_provider": model_provider,
-        "base_url": base_url,
-        "has_api_key": has_api_key,
+        "auth_type": auth_type,
         "has_oauth": has_oauth,
-        "source": sources,
+        "has_api_key": has_api_key,
+        "source": [config_path],
         "scope": "global",
     }
 
 
-class CliCodexLocalDriver(BaseDriver):
-    type_name = "cli-codex-local"
-    cli_name = "codex"
+class CliGeminiLocalDriver(BaseDriver):
+    type_name = "cli-gemini-local"
+    cli_name = "gemini"
 
     async def init(self, node_ctx):
         await super().init(node_ctx)
@@ -175,16 +164,12 @@ class CliCodexLocalDriver(BaseDriver):
         self.agents_dir = os.path.join(self.rule_root, "agents")
         self.node_id = node_ctx.get("node_id", "local")
         self.audit_dir = os.path.join(
-            PRE_LOG_ROOT, "codex_driver"
+            PRE_LOG_ROOT, "gemini_driver"
         )
-        # evaluator lazy import (避免 init 时拉满 pre 整套)
         self._evaluator = None
 
     async def discover_agents(self) -> list[AgentSpec]:
-        """扫 pre_rule/agents/<dir>/agent_pointer.json. pointer.cli == "codex" 的归本 driver.
-        跟 claude driver 同模式 (SOT 统一在 pointer + cwd/pre/agent_config.json).
-        配置缺一项 → status=failed 仍 yield, GUI 看见原因.
-        """
+        """扫 pre_rule/agents/<dir>/agent_pointer.json. pointer.cli == "gemini" 的归本 driver."""
         out: list[AgentSpec] = []
         if not os.path.isdir(self.agents_dir):
             return out
@@ -199,20 +184,18 @@ class CliCodexLocalDriver(BaseDriver):
         return out
 
     def _discover_one(self, name: str, agent_pre_dir: str) -> Optional[AgentSpec]:
-        """单 pre_rule/agents/<name>/ → AgentSpec, 或 None (非 codex 归别的 driver)."""
         pointer_path = os.path.join(agent_pre_dir, "agent_pointer.json")
         if not os.path.isfile(pointer_path):
-            # 没 pointer 完全跳过 (claude driver 会自己 yield orphan)
             return None
 
         try:
             with open(pointer_path) as f:
                 pointer = json.load(f)
         except (json.JSONDecodeError, OSError):
-            return None  # 让 claude driver 报 invalid-pointer; 此 driver 不抢
+            return None
 
-        if (pointer.get("cli") or "claude") != "codex":
-            return None  # 非 codex agent 跳过
+        if (pointer.get("cli") or "claude") != "gemini":
+            return None
 
         cwd = pointer.get("cwd", "")
         if not cwd or not os.path.isabs(cwd):
@@ -245,7 +228,7 @@ class CliCodexLocalDriver(BaseDriver):
             return self._failed_spec(
                 project_name,
                 reason="not-initialized",
-                hint=f"missing {cfg_path}; run pre-init --driver codex in {cwd}",
+                hint=f"missing {cfg_path}; run pre-init --driver gemini in {cwd}",
                 extra=common_extra,
             )
         try:
@@ -260,11 +243,11 @@ class CliCodexLocalDriver(BaseDriver):
             )
 
         cfg_cli = cfg.get("cli") or "claude"
-        if cfg_cli != "codex":
+        if cfg_cli != "gemini":
             return self._failed_spec(
                 project_name,
                 reason="cli-mismatch",
-                hint=f"pointer cli=codex but {cfg_path} cli={cfg_cli}",
+                hint=f"pointer cli=gemini but {cfg_path} cli={cfg_cli}",
                 extra=common_extra,
             )
 
@@ -292,7 +275,7 @@ class CliCodexLocalDriver(BaseDriver):
 
         cli_model = cfg.get("model") or None
         network = _probe_network_cached(cwd)
-        llm_route = _extract_codex_llm_route(cwd)
+        llm_route = _extract_gemini_llm_route(cwd)
 
         return AgentSpec(
             agent_id=agent_id,
@@ -304,7 +287,7 @@ class CliCodexLocalDriver(BaseDriver):
                 "tmux_session": tmux_session,
                 "mode": mode,
                 "project_name": project_name,
-                "cli": "codex",
+                "cli": "gemini",
                 "cli_model": cli_model,
                 "llm_route": llm_route,
                 "network": network,
@@ -314,12 +297,11 @@ class CliCodexLocalDriver(BaseDriver):
 
     def _failed_spec(self, slug: str, *, reason: str, hint: str,
                      extra: Optional[dict] = None) -> AgentSpec:
-        """构造 status=failed 的 AgentSpec. slug 决定 agent_id 末段."""
         meta: dict = {
             "status": "failed",
             "failure_reason": reason,
             "failure_hint": hint,
-            "cli": "codex",
+            "cli": "gemini",
         }
         if extra:
             meta.update(extra)
@@ -351,8 +333,8 @@ class CliCodexLocalDriver(BaseDriver):
         return False
 
     async def get_state(self, agent_id: str) -> str:
-        """Codex 没原生 stop hook, 字段可能缺. 返 idle 兜底, 让 detect_activity
-        覆盖真实状态. failed agent 返 "failed"."""
+        """Gemini 没原生 stop hook (driver 内嵌 evaluator 路径). 返 idle 兜底,
+        让 detect_activity 覆盖真实状态."""
         for spec in await self.discover_agents():
             if spec.agent_id == agent_id:
                 if not self._is_active(spec):
@@ -370,10 +352,7 @@ class CliCodexLocalDriver(BaseDriver):
         return "unknown"
 
     async def detect_pending(self, agent_id: str) -> Optional[dict]:
-        """Codex pane → parse → evaluator → auto allow/deny / 上报 ask.
-        默认 auto-decide 开启, 用户可在 agent_config.auto_governor.enabled=False 关闭.
-        failed agent 拒绝交互.
-        """
+        """Gemini pane → parse → evaluator → auto allow/deny / 上报 ask."""
         for spec in await self.discover_agents():
             if spec.agent_id != agent_id:
                 continue
@@ -385,7 +364,7 @@ class CliCodexLocalDriver(BaseDriver):
             pane = capture_pane(ts, lines=80)
             if not pane:
                 return None
-            pending = parse_codex_pending(pane, agent_id=agent_id)
+            pending = parse_gemini_pending(pane, agent_id=agent_id)
             if pending is None:
                 return None
 
@@ -393,7 +372,6 @@ class CliCodexLocalDriver(BaseDriver):
             auto_enabled = auto_cfg.get("enabled", True)
 
             if not auto_enabled:
-                # 兼容路径: 仅上报, 不自动按键
                 return {
                     "agent_id": agent_id,
                     "tool_kind": pending.tool_kind,
@@ -407,7 +385,6 @@ class CliCodexLocalDriver(BaseDriver):
                     },
                 }
 
-            # 主路径: 调 evaluator
             decision = self._evaluate(pending, spec)
             decision_name = str(decision.get("decision") or "ask")
 
@@ -437,7 +414,6 @@ class CliCodexLocalDriver(BaseDriver):
                 self._audit(base_audit)
                 return None
 
-            # ask → 上报 master, 让 GUI/用户决定
             base_audit["action"] = "reported_to_user"
             base_audit["ok"] = True
             self._audit(base_audit)
@@ -455,7 +431,7 @@ class CliCodexLocalDriver(BaseDriver):
             }
         return None
 
-    def _evaluate(self, pending: CodexPending, spec: AgentSpec) -> dict:
+    def _evaluate(self, pending: GeminiPending, spec: AgentSpec) -> dict:
         """调 pre evaluator. fail-closed: 任何异常 → ask."""
         if self._evaluator is None:
             try:
@@ -468,11 +444,11 @@ class CliCodexLocalDriver(BaseDriver):
             input_data = {
                 "tool_name": pending.tool_name,
                 "tool_input": pending.tool_input,
-                "session_id": f"codex-{spec.metadata.get('project_name', 'unknown')}",
+                "session_id": f"gemini-{spec.metadata.get('project_name', 'unknown')}",
                 "cwd": spec.metadata.get("cwd", ""),
                 "transcript_path": "",
                 "permission_mode": "default",
-                "runtime": "codex",
+                "runtime": "gemini",
                 "agent_id": spec.agent_id,
             }
             return self._evaluator(input_data)
@@ -480,14 +456,8 @@ class CliCodexLocalDriver(BaseDriver):
             return {"decision": "ask", "reason": f"evaluator raised: {e}",
                     "source": "driver_fail_closed"}
 
-    def _quick_decide(self, pending: CodexPending, spec: AgentSpec) -> str:
-        """Fast-path 决策 — 仅跑 local rules + cache, 跳 governor (不阻塞 detect_activity).
-        返 'allow' / 'deny' / 'ask' (含 unknown / cache miss).
-
-        用途: detect_activity 高频 (10s) 调用, 不能跑 governor LLM. local + cache 命中即
-        知道 driver 即将自动消化这个 pending, 不该让 master GUI 显示 blocked_user.
-        miss → 视为 ask (保守, 等 governor 真判完).
-        """
+    def _quick_decide(self, pending: GeminiPending, spec: AgentSpec) -> str:
+        """Fast-path 决策 (local rules + cache 跳 governor). 不阻塞 detect_activity."""
         try:
             from rules import evaluate as local_evaluate, GOVERNOR_NO_CACHE
             from cache import cache_key, get_cached
@@ -501,8 +471,7 @@ class CliCodexLocalDriver(BaseDriver):
         except Exception:
             return "ask"
         if decision and decision != GOVERNOR_NO_CACHE:
-            return decision  # local 直接判 allow/deny/ask
-        # local 没决策 (None) 或 GOVERNOR_NO_CACHE → 看 cache
+            return decision
         try:
             cfg = load_config()
             agent_pre_dir = ensure_agent_dir(cfg.pre_base_dir, cwd)
@@ -510,11 +479,11 @@ class CliCodexLocalDriver(BaseDriver):
         except Exception:
             return "ask"
         if cached is not None:
-            return cached[0]  # cache 命中过去 governor 决策
-        return "ask"  # local 没决策 + cache miss → 真要 governor 跑, 标 blocked_user 让 user 看
+            return cached[0]
+        return "ask"
 
     def _audit(self, entry: dict) -> None:
-        """append-only jsonl, chmod 600. 失败不抛 (audit 不能阻断决策)."""
+        """append-only jsonl, chmod 600."""
         try:
             os.makedirs(self.audit_dir, mode=0o700, exist_ok=True)
             date = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -543,8 +512,7 @@ class CliCodexLocalDriver(BaseDriver):
         return False
 
     async def detect_activity(self, agent_id: str) -> Optional[dict]:
-        """Codex pane → state + recent_actions + last_response + pane_summary.
-        failed agent 返带 failure 信息的精简 dict (GUI 渲染用)."""
+        """Gemini pane → state + recent_actions + last_response + pane_summary."""
         for spec in await self.discover_agents():
             if spec.agent_id != agent_id:
                 continue
@@ -563,34 +531,23 @@ class CliCodexLocalDriver(BaseDriver):
             if not pane:
                 return None
 
-            # state 判定: pending > busy > idle.
-            # codex 的 idle 锚点 (`tab to queue message` / `context left` /
-            # `›` prompt) 在 busy 时也显示 (底部状态栏常驻). 只要 busy marker (`• Working`
-            # / `Thinking…` 等) 出现就 busy, 不能被 idle 锚点覆盖.
-            #
-            # pending 出现时不要立即标 blocked_user, 先用 fast-path
-            # (local rules + cache, 跳 governor 不阻塞) 看能否自动决策. local allow/deny 或
-            # cache hit 明确决策 → state=busy (driver detect_pending 下一秒会自动按键).
-            # 仅 local 没决策 + cache 也没命中 (即真要 governor / user 判) 才标 blocked_user.
-            # 避免 evaluator allow/deny 路径 (一闪而过) 让 master GUI 错亮 blocked_user 提醒.
-            pending = parse_codex_pending(pane, agent_id=agent_id)
+            pending = parse_gemini_pending(pane, agent_id=agent_id)
             has_busy = _is_pane_busy(pane)
             if pending:
                 quick = self._quick_decide(pending, spec)
                 if quick in ("allow", "deny"):
-                    state = "busy"  # driver 即将自动按键消化, 不打扰 user
+                    state = "busy"
                 else:
-                    state = "blocked_user"  # 真要 ask user
+                    state = "blocked_user"
             elif has_busy:
                 state = "busy"
             else:
                 state = "idle"
-            has_pending = pending is not None
 
-            last_action = pending.description if pending else _extract_last_codex_action(pane)
+            last_action = pending.description if pending else _extract_last_gemini_action(pane)
             tool_kind = pending.tool_kind if pending else "unknown"
-            recent_actions = _extract_recent_codex_actions(pane, n=5)
-            last_response_excerpt = _extract_last_codex_response(pane)
+            recent_actions = _extract_recent_gemini_actions(pane, n=5)
+            last_response_excerpt = _extract_last_gemini_response(pane)
 
             tail_lines = [l for l in pane.splitlines() if l.strip()][-30:]
             pane_summary = "\n".join(tail_lines)[:2000]
@@ -603,7 +560,7 @@ class CliCodexLocalDriver(BaseDriver):
                 "tool_kind": tool_kind,
                 "recent_actions": recent_actions,
                 "last_response_excerpt": last_response_excerpt,
-                "claude_status": None,  # codex 无对应字段
+                "claude_status": None,
                 "pane_summary": pane_summary,
                 "pane_fp": pane_fp,
                 "tmux_session": ts,
@@ -612,13 +569,13 @@ class CliCodexLocalDriver(BaseDriver):
         return None
 
     async def init_agent(self, target_dir: str, opts: Optional[dict] = None) -> InitResult:
-        """幂等初始化一个 codex agent.
+        """幂等初始化一个 gemini agent.
 
-        4 步 (跟 claude 5 步对应, 砍 .claude/settings.json hook — codex 无 hook 接口,
-        approval 走 driver 内嵌 evaluator):
+        4 步 (跟 codex 4 步对应, 不写 .gemini/settings.json hook — gemini 走
+        driver 内嵌 evaluator + pane scrape, 跟 codex 一致):
           1. validate target_dir
-          2. cwd/pre/ 树 + agent_config.json (cli=codex, start_command=codex)
-          3. pre_rule/agents/<dir>/agent_pointer.json (cli=codex)
+          2. cwd/pre/ 树 + agent_config.json (cli=gemini, start_command=gemini)
+          3. pre_rule/agents/<dir>/agent_pointer.json (cli=gemini)
           4. tmux session check
 
         opts: mode, tmux_session, project_name, model, role, write_templates.
@@ -626,7 +583,6 @@ class CliCodexLocalDriver(BaseDriver):
         opts = opts or {}
         result = InitResult(ok=False, agent_id="", target_dir=target_dir)
 
-        # 1. validate
         if not os.path.isabs(target_dir):
             result.failures.append(f"target_dir must be absolute: {target_dir}")
             return result
@@ -641,7 +597,6 @@ class CliCodexLocalDriver(BaseDriver):
         agent_id = f"{self.node_id}.{self.type_name}.{project_name}"
         result.agent_id = agent_id
 
-        # 2. target_dir/pre/ 树 + agent_config.json
         pre_dir = os.path.join(target_dir, "pre")
         for sub in (pre_dir,
                     os.path.join(pre_dir, "findings"),
@@ -664,20 +619,20 @@ class CliCodexLocalDriver(BaseDriver):
                 result.failures.append(f"existing {cfg_path} unreadable: {e}")
                 return result
             existing_cli = existing.get("cli") or "claude"
-            if existing_cli != "codex":
+            if existing_cli != "gemini":
                 result.conflicts.append(
                     f"{cfg_path} cli={existing_cli}; refuse to overwrite "
-                    f"(this cwd belongs to a non-codex driver)"
+                    f"(this cwd belongs to a non-gemini driver)"
                 )
                 return result
             result.skipped.append(cfg_path)
         else:
             cfg = {
-                "cli": "codex",
+                "cli": "gemini",
                 "mode": mode,
                 "tmux_session": tmux_session,
                 "project_name": project_name,
-                "start_command": "codex",
+                "start_command": "gemini",
             }
             if opts.get("model"):
                 cfg["model"] = opts["model"]
@@ -697,8 +652,8 @@ class CliCodexLocalDriver(BaseDriver):
             if not os.path.isfile(rules_path):
                 with open(rules_path, "w", encoding="utf-8") as f:
                     f.write(
-                        f"# {project_name} — PreToolUse Rules (codex)\n\n"
-                        f"Driver 内嵌 evaluator 评估 Codex approval, 叠加此规则到"
+                        f"# {project_name} — PreToolUse Rules (gemini)\n\n"
+                        f"Driver 内嵌 evaluator 评估 Gemini approval, 叠加此规则到"
                         f"全局规则之上.\n\n"
                         f"## 额外 ALLOW\n\n## 额外 ASK\n\n## 额外 DENY\n"
                     )
@@ -717,7 +672,7 @@ class CliCodexLocalDriver(BaseDriver):
             else:
                 result.skipped.append(next_path)
 
-        # 3. pre_rule/agents/<dir>/agent_pointer.json (driver 索引)
+        # 3. pre_rule/agents/<dir>/agent_pointer.json
         dir_name = target_dir.strip("/").replace("/", "-")
         agent_pre_dir = os.path.join(self.agents_dir, dir_name)
         if not os.path.isdir(agent_pre_dir):
@@ -743,9 +698,9 @@ class CliCodexLocalDriver(BaseDriver):
                         f"{pointer_path} cwd={existing_ptr.get('cwd')!r} "
                         f"but target_dir={target_dir!r}; remove pointer to re-init"
                     )
-                elif (existing_ptr.get("cli") or "claude") != "codex":
+                elif (existing_ptr.get("cli") or "claude") != "gemini":
                     result.conflicts.append(
-                        f"{pointer_path} cli={existing_ptr.get('cli')!r} but expected codex"
+                        f"{pointer_path} cli={existing_ptr.get('cli')!r} but expected gemini"
                     )
                 else:
                     result.skipped.append(pointer_path)
@@ -753,7 +708,7 @@ class CliCodexLocalDriver(BaseDriver):
             pointer = {
                 "cwd": target_dir,
                 "agent_id": agent_id,
-                "cli": "codex",
+                "cli": "gemini",
                 "project_name": project_name,
                 "created_at": time.time(),
             }
@@ -772,7 +727,7 @@ class CliCodexLocalDriver(BaseDriver):
             result.skipped.append(f"tmux session '{tmux_session}' already running")
         else:
             result.next_steps.append(
-                f"tmux session '{tmux_session}' not running. To spawn codex:\n"
+                f"tmux session '{tmux_session}' not running. To spawn gemini:\n"
                 f"  bash {spawn_script} {agent_id}"
             )
 
@@ -785,23 +740,22 @@ class CliCodexLocalDriver(BaseDriver):
         pass
 
 
-# Codex pane 辅助抽取 (跟 Claude 不同 — Codex 没 ⏺/⎿ 标记, 用 reasoning/cmd 起首行)
+# Gemini pane 辅助抽取 (待 fixture 实测后调). 第一版用通用 line pattern.
 
-# 常见 Codex 操作行起首 (实测后可补)
-_CODEX_ACTION_RE = re.compile(
-    r"^(?:•\s+)?(?:Running|Bash|Edit|Write|Read|Search|Apply|Patching)\b(.*)$"
+_GEMINI_ACTION_RE = re.compile(
+    r"^(?:•\s+)?(?:Running|Bash|Edit|Write|Read|Search|Patching|Tool|Apply)\b(.*)$"
 )
 
 
-def _extract_recent_codex_actions(pane: str, n: int = 5) -> list[dict]:
-    """倒序抽 Codex 操作行 (实测后再调). 无 marker 时返空."""
+def _extract_recent_gemini_actions(pane: str, n: int = 5) -> list[dict]:
+    """倒序抽 Gemini 操作行 (实测后再调)."""
     lines = pane.splitlines()
     actions = []
     for i in range(len(lines) - 1, -1, -1):
         if len(actions) >= n:
             break
         line = lines[i].strip()
-        m = _CODEX_ACTION_RE.match(line)
+        m = _GEMINI_ACTION_RE.match(line)
         if m:
             head = line.split(maxsplit=1)
             tool = head[0] if head[0] != "•" else (head[1].split(maxsplit=1)[0] if len(head) > 1 else "")
@@ -809,21 +763,23 @@ def _extract_recent_codex_actions(pane: str, n: int = 5) -> list[dict]:
     return actions
 
 
-def _extract_last_codex_action(pane: str) -> str:
-    """tail 取最近一行非空非提示行作为 last_action 兜底."""
+def _extract_last_gemini_action(pane: str) -> str:
     lines = pane.splitlines()
     for line in reversed(lines):
         s = line.strip()
         if not s:
             continue
-        if s.startswith("›") or "tab to queue" in s.lower() or "context left" in s.lower():
+        if (s.startswith(">") or "type your message" in s.lower()
+                or "context left" in s.lower()):
             continue
         return s[:200]
     return ""
 
 
-def _extract_last_codex_response(pane: str) -> str:
-    """末尾连续非工具/非提示行 = agent 最后输出. 截 500 字."""
+def _extract_last_gemini_response(pane: str) -> str:
+    """抽 gemini 末尾的纯文字回应. gemini response 前缀 `✦`, 跳过
+    用户消息 (` > ...`) / box drawing (▄▄/▀▀) / idle hint.
+    """
     lines = pane.splitlines()
     collected = []
     for line in reversed(lines):
@@ -832,16 +788,34 @@ def _extract_last_codex_response(pane: str) -> str:
             if collected:
                 continue
             continue
-        first = s.lstrip()[:3]
-        if (first.startswith("›") or first.startswith("•") or
-                "──" in s or "━━" in s or
-                "tab to queue" in s.lower() or
-                "context left" in s.lower() or
-                "esc to" in s.lower()):
+        # 跳过 box drawing
+        if "▄" in s or "▀" in s or "──" in s or "━━" in s:
             if collected:
                 break
             continue
-        collected.append(s.strip())
+        # 跳过用户消息行
+        if s.lstrip().startswith("> ") or s.lstrip().startswith("›"):
+            if collected:
+                break
+            continue
+        # 跳过 idle hint / footer (gemini footer 含 "workspace" / "sandbox" /
+        # "/model" header row + value row "~/cursor/... no sandbox ... % used")
+        lower = s.lower()
+        if ("type your message" in lower or
+                "? for shortcuts" in lower or
+                "shift+tab to accept" in lower or
+                "workspace (/" in lower or
+                "no sandbox" in lower or
+                "% used" in lower or
+                ("auto (" in lower and ")" in lower)):
+            if collected:
+                break
+            continue
+        # 去掉 gemini response 前缀 ✦
+        s_clean = s.lstrip()
+        if s_clean.startswith("✦"):
+            s_clean = s_clean[1:].lstrip()
+        collected.append(s_clean.strip())
     if not collected:
         return ""
     text = "\n".join(reversed(collected))
@@ -850,7 +824,7 @@ def _extract_last_codex_response(pane: str) -> str:
     return text
 
 
-def _preview_tool_input(pending: CodexPending) -> str:
+def _preview_tool_input(pending: GeminiPending) -> str:
     if pending.tool_name == "Bash":
         return str(pending.tool_input.get("command", ""))[:240]
     if pending.tool_name in ("Read", "Write", "Edit"):

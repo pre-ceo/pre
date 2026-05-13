@@ -23,12 +23,24 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from .config import load_config
-from .logger import log_event
-from .rules import evaluate as local_evaluate, GOVERNOR_NO_CACHE
-from .cache import cache_key, get_cached, set_cached
-from .governor import query_governor, ensure_agent_dir
-from .analyzer import load_agent_config
+# dual import 兼容:
+#   1. hook.py 从 `src` package 调用 (`from src.hook import main` → relative work)
+#   2. driver 顶级 import (`from prehook_evaluator import evaluate_prehook`,
+#      sys.path 含 pre/src) — relative 失败, 走 absolute fallback
+try:
+    from .config import load_config
+    from .logger import log_event
+    from .rules import evaluate as local_evaluate, GOVERNOR_NO_CACHE
+    from .cache import cache_key, get_cached, set_cached
+    from .governor import query_governor, ensure_agent_dir
+    from .analyzer import load_agent_config
+except ImportError:
+    from config import load_config  # type: ignore[no-redef]
+    from logger import log_event  # type: ignore[no-redef]
+    from rules import evaluate as local_evaluate, GOVERNOR_NO_CACHE  # type: ignore[no-redef]
+    from cache import cache_key, get_cached, set_cached  # type: ignore[no-redef]
+    from governor import query_governor, ensure_agent_dir  # type: ignore[no-redef]
+    from analyzer import load_agent_config  # type: ignore[no-redef]
 
 
 def _safe_preview(tool_name: str, tool_input: dict) -> dict:

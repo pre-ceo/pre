@@ -21,7 +21,7 @@
 # NODE_TRANSPORT — ws-client (默认, 主动连 master) / ws-server (远端被动等 master connect)
 # NODE_LISTEN_HOST — ws-server 模式 listen host (默认 127.0.0.1)
 # NODE_LISTEN_PORT — ws-server 模式 listen port (默认 9500)
-# NODE_CAPABILITIES — daemon capabilities (默认 cli-claude-code-local)
+# NODE_CAPABILITIES — daemon capabilities (默认 cli-claude-code-local,cli-codex-local,cli-gemini-local)
 
 set -euo pipefail
 
@@ -54,7 +54,7 @@ NODE_ID="${NODE_ID:-local}"
 NODE_TRANSPORT="${NODE_TRANSPORT:-ws-client}"
 NODE_LISTEN_HOST="${NODE_LISTEN_HOST:-127.0.0.1}"
 NODE_LISTEN_PORT="${NODE_LISTEN_PORT:-9500}"
-NODE_CAPABILITIES="${NODE_CAPABILITIES:-cli-claude-code-local}"
+NODE_CAPABILITIES="${NODE_CAPABILITIES:-cli-claude-code-local,cli-codex-local,cli-gemini-local}"
 
 # multi-token RBAC: master 的 token 在 master.db 内. node 启动时需要拿到 node-default
 # token 的 raw 才能 ws connect. 来源优先级:
@@ -361,7 +361,7 @@ pre bus_ctl.sh — tmux 监管 Master + Node
   NODE_TRANSPORT      ws-client (默认) / ws-server (远端被动等)
   NODE_LISTEN_HOST    ws-server 模式 listen host (默认 127.0.0.1)
   NODE_LISTEN_PORT    ws-server 模式 listen port (默认 9500)
-  NODE_CAPABILITIES   daemon capabilities (默认 cli-claude-code-local)
+  NODE_CAPABILITIES   daemon capabilities (默认 cli-claude-code-local,cli-codex-local,cli-gemini-local)
   FNPRE_MASTER_ARGS   覆盖 master 启动参数
   FNPRE_NODE_ARGS     覆盖 node 启动参数
   PRE_UI_PATH       pre_ui 项目路径 (默认 pre 仓库的 sibling pre_ui)

@@ -7,7 +7,10 @@ import json
 import os
 import re
 
-from .governor import _load_file, _shell_quote
+try:
+    from .governor import _load_file, _shell_quote
+except ImportError:
+    from governor import _load_file, _shell_quote  # type: ignore[no-redef]
 
 # 从 claude -p 输出中提取结构化分析
 _REASON_RE = re.compile(r"STOP_REASON:\s*(COMPLETED|EXPLORING|ERROR|BLOCKED|UNCERTAIN|IDLE)", re.IGNORECASE)

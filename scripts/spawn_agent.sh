@@ -87,6 +87,27 @@ MASTER_URL="${PRE_MASTER_URL:-http://127.0.0.1:19500}"
 NODE_ID="${PRE_NODE_ID:-local}"
 TOKEN="${PRE_SECRET:-fnpre}"
 
+# 读 agent_config.json 的 cli 字段, 决定 driver_type + 默认 start_command.
+# cli 值 → 三段 agent_id 第 2 段 (driver type_name).
+AGENT_CLI="claude"
+if [[ -f "$POINTER_CWD/pre/agent_config.json" ]]; then
+    _cli=$(python3 -c "
+import json
+try:
+    d = json.load(open('$POINTER_CWD/pre/agent_config.json'))
+    print(d.get('cli', '') or '')
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    [[ -n "$_cli" ]] && AGENT_CLI="$_cli"
+fi
+case "$AGENT_CLI" in
+    claude) DRIVER_TYPE="cli-claude-code-local" ;;
+    codex)  DRIVER_TYPE="cli-codex-local" ;;
+    gemini) DRIVER_TYPE="cli-gemini-local" ;;
+    *)      DRIVER_TYPE="cli-claude-code-local" ;;
+esac
+
 # tmux startup rc resolution (source rule.sh + JP egress 验证)
 # 优先序: $RULE_ROOT/tmux_startup.sh (env-first via RULE_ROOT line 31) > <pre>/scripts/tmux_startup.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -416,8 +437,9 @@ if [[ ! -f "$RULE_AGENT_DIR/agent_config.json" ]]; then
 EOF
 fi
 
-# 2.5 .claude/settings.json (PreToolUse + Stop hook 接入 pre)
-# [ dispatch fix] 用 needs_wire() 三态判断 (不存在/缺/损坏 → wire), backup 永留, idempotent.
+# 2.5 hook 写入 — 仅 claude 有 hook 接口. codex/gemini 走 driver 内嵌 evaluator
+# + pane scrape (driver detect_pending 抓 cli 自己的 approval UI), 跳过 hook 写入.
+if [[ "$AGENT_CLI" == "claude" ]]; then
 mkdir -p "$PROJECT_DIR/.claude"
 _LOCAL_SET_F="$PROJECT_DIR/.claude/settings.json"
 if needs_wire "$_LOCAL_SET_F"; then
@@ -459,6 +481,7 @@ if needs_wire "$_LOCAL_SET_F"; then
 }
 EOF
 fi
+fi  # end if AGENT_CLI == claude
 
 # 2.6 项目级 pre/rules.md (默认轻量模板, 项目可后续扩)
 if [[ ! -f "$PROJECT_DIR/pre/rules.md" ]]; then
@@ -502,8 +525,8 @@ fi
 if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
     ok "tmux session $TMUX_SESSION 已存在, 跳过启动"
 else
-    # 读 agent_config.json 的 start_command 字段, 否则默认 'claude'
-    START_CMD="claude"
+    # 读 agent_config.json 的 start_command 字段, 否则按 cli 默认 (claude/codex/gemini)
+    START_CMD="$AGENT_CLI"
     if command -v python3 >/dev/null 2>&1; then
         custom=$(python3 -c "import json,sys; d=json.load(open('$PROJECT_DIR/pre/agent_config.json')); print(d.get('start_command',''))" 2>/dev/null)
         if [[ -n "$custom" ]]; then
@@ -537,7 +560,7 @@ fi
 
 # 5. 检查 agent 是否注册成功 (sleep 一下让 node 处理)
 sleep 1
-agent_id="$NODE_ID.cli-claude-code-local.$PROJECT"
+agent_id="$NODE_ID.$DRIVER_TYPE.$PROJECT"
 listed=$(curl -sS -H "Authorization: Bearer $TOKEN" "$MASTER_URL/api/v1/agents" 2>/dev/null \
     | python3 -c "import sys,json;d=json.load(sys.stdin);print(any(a['agent_id']=='$agent_id' for a in d.get('agents',[])))" 2>/dev/null || echo "False")
 if [[ "$listed" == "True" ]]; then

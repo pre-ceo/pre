@@ -167,16 +167,41 @@ def _cmd_list(rest):
                                 description="List discovered agents with status.")
     p.add_argument("--failed-only", action="store_true")
     p.add_argument("--ok-only", action="store_true")
+    p.add_argument("--driver", default=None,
+                   choices=["claude", "codex", "gemini"],
+                   help="filter by cli driver (default: all)")
     args = p.parse_args(rest)
 
     from drivers.cli_claude_code_local.driver import CliClaudeCodeLocalDriver
+    from drivers.cli_codex_local.driver import CliCodexLocalDriver
+    _DRIVERS = [CliClaudeCodeLocalDriver, CliCodexLocalDriver]
+    try:
+        from drivers.cli_gemini_local.driver import CliGeminiLocalDriver
+        _DRIVERS.append(CliGeminiLocalDriver)
+    except ImportError:
+        pass
 
     async def _run():
-        drv = CliClaudeCodeLocalDriver()
-        await drv.init({"node_id": os.environ.get("PRE_NODE_ID", "local")})
-        return await drv.discover_agents()
+        all_specs = []
+        for cls in _DRIVERS:
+            drv = cls()
+            await drv.init({"node_id": os.environ.get("PRE_NODE_ID", "local")})
+            try:
+                specs = await drv.discover_agents()
+            except Exception as e:
+                print(f"{C_YELLOW}[warn]{C_RESET} {cls.__name__}.discover failed: {e}")
+                continue
+            for s in specs:
+                # 标 cli 供 filter 用 (metadata 已带 cli, 但失败 spec 可能也带)
+                s.metadata.setdefault("_driver_cli", drv.cli_name)
+            all_specs.extend(specs)
+        return all_specs
 
     specs = asyncio.run(_run())
+    if args.driver:
+        specs = [s for s in specs
+                 if s.metadata.get("_driver_cli") == args.driver
+                 or s.metadata.get("cli") == args.driver]
     if args.failed_only:
         specs = [s for s in specs if s.metadata.get("status") != "ok"]
     elif args.ok_only:
@@ -189,7 +214,8 @@ def _cmd_list(rest):
     for s in specs:
         st = s.metadata.get("status", "?")
         color = C_CYAN if st == "ok" else C_YELLOW
-        print(f"{color}[{st}]{C_RESET} {s.agent_id}")
+        cli = s.metadata.get("cli") or s.metadata.get("_driver_cli") or "?"
+        print(f"{color}[{st}]{C_RESET} {s.agent_id} {C_DIM}({cli}){C_RESET}")
         if st == "ok":
             print(f"      cwd:  {s.metadata.get('cwd')}")
             print(f"      tmux: {s.metadata.get('tmux_session')}  "

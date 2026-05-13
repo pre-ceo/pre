@@ -15,6 +15,27 @@ class AgentSpec:
     metadata: dict = field(default_factory=dict)
 
 
+@dataclass
+class InitResult:
+    """init_agent 返回值. 所有 driver 共用.
+
+    ok=True: 所有步骤就位且 tmux session 在跑.
+    ok=False: conflicts/failures/next_steps 给修复指引.
+
+    幂等保证: 重跑同 target_dir 不破坏用户已有内容; cli-specific 设置 (例如
+    claude 的 .claude/settings.json hook) 冲突 → 进 conflicts (不强改);
+    pointer 已存在且 cwd/cli 不一致 → 进 conflicts.
+    """
+    ok: bool
+    agent_id: str
+    target_dir: str
+    created: list = field(default_factory=list)
+    skipped: list = field(default_factory=list)
+    conflicts: list = field(default_factory=list)
+    next_steps: list = field(default_factory=list)
+    failures: list = field(default_factory=list)
+
+
 class BaseDriver:
     """
     所有 driver 继承本类.
@@ -22,6 +43,7 @@ class BaseDriver:
     """
 
     type_name: str = "base"
+    cli_name: str = "base"  # 跟 agent_config.json 的 cli 字段对应 (claude/codex/gemini)
 
     async def init(self, node_ctx) -> None:
         """driver 启动. node_ctx 包含 node_id, config 等"""
@@ -63,6 +85,27 @@ class BaseDriver:
           since_ts: 检测时间
         """
         return None
+
+    async def init_agent(self, target_dir: str, opts: Optional[dict] = None) -> InitResult:
+        """幂等初始化一个 agent 到 target_dir.
+
+        共用契约 (各 driver 子类实现具体步骤):
+          1. validate target_dir (绝对路径, 存在)
+          2. 写 target_dir/pre/agent_config.json (cli=cli_name)
+          3. cli-specific 接入 (claude 写 .claude/settings.json hook;
+             codex/gemini 跳过 — 走 driver 内嵌 evaluator)
+          4. 写 pre_rule/agents/<dir>/agent_pointer.json
+          5. tmux session check (用户起 spawn_agent.sh)
+
+        opts 可选: mode, tmux_session, project_name, model, role,
+          write_claude_settings (claude only), write_templates.
+        """
+        return InitResult(
+            ok=False,
+            agent_id="",
+            target_dir=target_dir,
+            failures=[f"init_agent not implemented for driver {self.type_name}"],
+        )
 
     async def shutdown(self) -> None:
         """清理资源"""

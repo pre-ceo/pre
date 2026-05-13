@@ -25,32 +25,10 @@ import hashlib
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
 from typing import Optional
 
-from drivers.base import BaseDriver, AgentSpec
+from drivers.base import BaseDriver, AgentSpec, InitResult
 from tmux_helper import send_to_tmux, send_key, capture_pane, has_session
-
-
-@dataclass
-class InitResult:
-    """init_agent 返回值.
-
-    ok=True: 所有步骤就位且 tmux session 在跑.
-    ok=False: conflicts/failures/next_steps 给修复指引.
-
-    幂等保证: 重跑同 target_dir 不破坏用户已有 rules.md / settings.json 内容;
-    .claude/settings.json 有非 pre 的同事件 hook → 进 conflicts (不强改);
-    pointer 已存在且 cwd 不一致 → 进 conflicts.
-    """
-    ok: bool
-    agent_id: str
-    target_dir: str
-    created: list = field(default_factory=list)
-    skipped: list = field(default_factory=list)
-    conflicts: list = field(default_factory=list)
-    next_steps: list = field(default_factory=list)
-    failures: list = field(default_factory=list)
 
 
 # claude code v2.1 ask UI 标志字串 — 检测时**同时**至少匹配 "Do you want" 系列 (精确)
@@ -290,6 +268,7 @@ def _has_pre_hook_installed(cwd: str) -> bool:
 
 class CliClaudeCodeLocalDriver(BaseDriver):
     type_name = "cli-claude-code-local"
+    cli_name = "claude"
 
     async def init(self, node_ctx):
         await super().init(node_ctx)

@@ -11,6 +11,8 @@ stdin (JSON) → evaluate_prehook → stdout (Claude Code hookSpecificOutput JSO
 I/O 契约遵循 Claude Code PreToolUse 官方规范:
   Input:  { tool_name, tool_input, session_id, cwd, permission_mode, ... }
   Output: { hookSpecificOutput: { hookEventName, permissionDecision, permissionDecisionReason } }
+
+(codex / gemini 走 driver 内嵌 evaluator + pane scrape, 不调本 hook.)
 """
 import sys
 import os

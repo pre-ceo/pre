@@ -334,8 +334,9 @@ async def run_node(args):
                         pass
 
                     for t, drv in dm.drivers.items():
-                        # codex driver 也纳入 (codex 输入框同样会卡)
-                        if t not in ("cli-claude-code-local", "cli-codex-local"):
+                        # codex / gemini driver 也纳入 (cli 输入框同样会卡)
+                        if t not in ("cli-claude-code-local", "cli-codex-local",
+                                     "cli-gemini-local"):
                             continue
                         try:
                             specs = await drv.discover_agents()
@@ -441,8 +442,8 @@ def main():
     p.add_argument("--secret", default=None,
                    help="ws bearer; 默认从 ~/.pre/env PRE_NODE_SECRET 取 (PR3)")
     p.add_argument("--capabilities", default="",
-                   help="逗号分隔: cli-claude-code-local, cli-codex-local "
-                        "(cli-claude-code-remote 已废弃)")
+                   help="逗号分隔: cli-claude-code-local, cli-codex-local, "
+                        "cli-gemini-local (cli-claude-code-remote 已废弃)")
     # transport 选项
     p.add_argument("--transport", default="ws-client",
                    choices=["ws-client", "ws-server"],

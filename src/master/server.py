@@ -2066,8 +2066,17 @@ async def handle_http(reader, writer, method, path, headers, body, registry, db)
                     if m.get("kind") not in ("command", "task_request", "evaluate_request"):
                         continue
                     payload = m.get("payload", {}) or {}
+                    # 候选字段任一: task_title / task / text / prompt.
+                    # task 在 fn_pre 派单消息里可能是 dict (含 goal/subject/...),
+                    # 不是 str — 直接 raw[:60] 会抛 unhashable type: 'slice'.
+                    # fall back: dict 优先取 goal/subject/text 转 str.
                     raw = (payload.get("task_title") or payload.get("task")
                            or payload.get("text") or payload.get("prompt") or "")
+                    if isinstance(raw, dict):
+                        raw = (raw.get("goal") or raw.get("subject")
+                               or raw.get("text") or raw.get("description") or "")
+                    if not isinstance(raw, str):
+                        raw = str(raw) if raw else ""
                     if not raw:
                         continue
                     title = raw[:60].replace("\n", " ")
@@ -4802,10 +4811,11 @@ async def handle_client(reader, writer, registry, db, secret):
         import traceback
         tb = traceback.format_exc().splitlines()
         print(f"[master] client error: {type(e).__name__}: {e}", flush=True)
-        # 只打 application 层 frame (跳过 stdlib)
+        # 打全 traceback (含 stdlib frame). 之前的 filter 只打 pre/src 漏了
+        # stdlib frame, 排查 type error / attribute error 时根本找不到根因
+        # (见 2026-05-13 unhashable slice 案例).
         for line in tb:
-            if "pre/src" in line or "pre/scripts" in line:
-                print(f"[master]   {line}", flush=True)
+            print(f"[master]   {line}", flush=True)
         try:
             writer.close()
         except Exception:
