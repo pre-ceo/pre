@@ -116,7 +116,8 @@ def _refresh_mcp() -> int:
             continue
         subprocess.run([cli, "mcp", "remove", "pre"],
                        capture_output=True, text=True)  # 老 entry 删, 不 fail
-        r = subprocess.run([cli, "mcp", "add", "pre", "--", shim],
+        # gemini cli 不认 `--` 分隔符, 三 cli 统一 positional 写法
+        r = subprocess.run([cli, "mcp", "add", "pre", shim],
                            capture_output=True, text=True)
         if r.returncode == 0:
             print(f"{C_CYAN}[ok]{C_RESET}    {cli}    -> {shim}")

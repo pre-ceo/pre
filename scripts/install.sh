@@ -216,9 +216,11 @@ else
             continue
         fi
         echo "─── $cli mcp register ───"
-        # 老 entry (任意 path) 删了, 重 add 指 shim
+        # 老 entry (任意 path) 删了, 重 add 指 shim.
+        # gemini cli 不认 POSIX `--` 分隔符, 把 shim 直接当 commandOrUrl positional;
+        # claude/codex 也接受这种写法 (shim 路径不以 `-` 开头不会被当 option).
         "$cli" mcp remove pre 2>/dev/null || true
-        if "$cli" mcp add pre -- "$ARG_BIN_DIR/pre-mcp" 2>&1; then
+        if "$cli" mcp add pre "$ARG_BIN_DIR/pre-mcp" 2>&1; then
             _set_cli_status "$cli" "registered $cli mcp pre -> $ARG_BIN_DIR/pre-mcp"
         else
             _set_cli_status "$cli" "failed (see error above)"
