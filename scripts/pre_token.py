@@ -172,6 +172,16 @@ def cmd_rotate(args):
     print(f"  {C_CYAN}new raw token (一次性):{C_RESET}")
     print(f"    {raw}")
 
+    # role=gui — 同时输出 fe ui 一次性激活 magic link (跟 start_master bootstrap 一致)
+    if role == "gui":
+        base = os.environ.get("FNPRE_UI_URL", "http://127.0.0.1:5174/index.html")
+        link = f"{base}#token={raw}&next=/"
+        print()
+        print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
+        print(f"{C_CYAN}  FE UI 一次性激活链接 (浏览器打开 → 自动保存 token → 跳 /):{C_RESET}")
+        print(f"{C_CYAN}  {link}{C_RESET}")
+        print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
+
 
 def cmd_show(args):
     db = _open_db(args.db)

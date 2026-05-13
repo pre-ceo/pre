@@ -237,6 +237,28 @@ cat <<EOF
 optional:
   编辑 $RC_FILE_PRE 加代理 / PATH / nvm 等 — bus_ctl.sh 和 agent tmux 启动时 source.
 
+EOF
+
+# GUI token / fe ui 激活状态
+if [ -f "$ENV_FILE" ] && grep -qE '^PRE_GUI_SECRET=' "$ENV_FILE"; then
+    cat <<EOF
+fe ui:
+  PRE_GUI_SECRET 已在 ~/.pre/env (历次 master bootstrap 写入).
+  失去 fe ui token: python3 $PRE_ROOT/scripts/pre_token.py rotate --label gui-default
+  → stderr 输出新一次性 magic link 浏览器打开即激活.
+
+EOF
+else
+    cat <<EOF
+fe ui:
+  PRE_GUI_SECRET 暂未生成. 跑 'pre bus start' → master idempotent bootstrap 自动
+  颁发, stderr 输出一次性 magic link (浏览器打开 → 自动保存 token → 跳 /).
+  错过显示: pre bus logs master | grep '一次性激活链接'
+
+EOF
+fi
+
+cat <<EOF
 next steps:
   1. pre bus start          # 起 master + node + ui + cron (tmux 长驻)
   2. pre init <proj>        # 给项目装 hook (PreToolUse + Stop)
