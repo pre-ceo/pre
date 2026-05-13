@@ -4,6 +4,8 @@
 子命令:
   init <cwd>           在指定目录初始化 claude agent (= pre_init.py)
   migrate              迁移老 pre_rule/agents/<dir>/ 到 pointer 格式 (= pre_migrate.py)
+  repair [cwd]         强制重写 cwd agent_config + .claude hook (= pre_repair.py)
+  update               git pull pre + pre_ui, uv sync, bus restart (= pre_update.py)
   spawn <id>           起 tmux session + 通知 master rediscover (= spawn_agent.sh)
   rm <id|dir>          删除 pre_rule/agents/<dir>/ 索引 (不动 cwd)
   list                 列所有 discover_agents 结果 + 状态
@@ -46,6 +48,18 @@ def _cmd_migrate(rest):
     import pre_migrate
     sys.argv = ["pre migrate"] + rest
     return pre_migrate.main()
+
+
+def _cmd_repair(rest):
+    import pre_repair
+    sys.argv = ["pre repair"] + rest
+    return pre_repair.main()
+
+
+def _cmd_update(rest):
+    import pre_update
+    sys.argv = ["pre update"] + rest
+    return pre_update.main()
 
 
 def _cmd_spawn(rest):
@@ -189,6 +203,8 @@ def _cmd_list(rest):
 _COMMANDS = {
     "init": _cmd_init,
     "migrate": _cmd_migrate,
+    "repair": _cmd_repair,
+    "update": _cmd_update,
     "spawn": _cmd_spawn,
     "rm": _cmd_rm,
     "list": _cmd_list,
@@ -202,6 +218,8 @@ def _usage():
     print("commands:")
     print("  init <cwd>           initialize a claude agent in cwd (idempotent)")
     print("  migrate              migrate legacy pre_rule/agents/ to pointer format")
+    print("  repair [cwd]         force-rewrite agent_config + .claude hook in cwd")
+    print("  update               git pull pre + pre_ui, uv sync, bus restart")
     print("  spawn <id>           start tmux session for agent_id + notify master")
     print("  rm <id|dir>          remove pre_rule/agents/<dir>/ index (cwd untouched)")
     print("  list                 list all discovered agents with status")
