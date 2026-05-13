@@ -203,19 +203,25 @@ else
     fi
 
     # codex / gemini mcp 注册. shim 入口同 ~/.claude.json — 三 cli 一致.
-    # cli 没装 → skip 不 fail.
+    # cli 没装 → skip 不 fail. (macOS bash 3.2 没 ${var^^}, 用 case 显式赋值.)
+    _set_cli_status() {
+        case "$1" in
+            codex)  CODEX_MCP_STATUS="$2" ;;
+            gemini) GEMINI_MCP_STATUS="$2" ;;
+        esac
+    }
     for cli in codex gemini; do
         if ! command -v "$cli" >/dev/null 2>&1; then
-            eval "${cli^^}_MCP_STATUS=\"skipped ($cli not installed)\""
+            _set_cli_status "$cli" "skipped ($cli not installed)"
             continue
         fi
         echo "─── $cli mcp register ───"
         # 老 entry (任意 path) 删了, 重 add 指 shim
         "$cli" mcp remove pre 2>/dev/null || true
         if "$cli" mcp add pre -- "$ARG_BIN_DIR/pre-mcp" 2>&1; then
-            eval "${cli^^}_MCP_STATUS=\"registered $cli mcp pre -> $ARG_BIN_DIR/pre-mcp\""
+            _set_cli_status "$cli" "registered $cli mcp pre -> $ARG_BIN_DIR/pre-mcp"
         else
-            eval "${cli^^}_MCP_STATUS=\"failed (see error above)\""
+            _set_cli_status "$cli" "failed (see error above)"
         fi
     done
 fi
