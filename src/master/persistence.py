@@ -1191,6 +1191,18 @@ class MasterDB:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def update_bus_token_agent_id(self, label: str, agent_id: Optional[str]) -> bool:
+        """改 agent_id binding. 给 mcp-default 类升级到 node-prefix 用.
+        sqlite IS NOT 已覆盖 NULL vs 非NULL 比较.
+        返 True 实际改了行, False 没找到 / 已撤 / 值没变."""
+        cur = self.conn.execute(
+            "UPDATE bus_tokens SET agent_id=? "
+            "WHERE label=? AND revoked_ts IS NULL AND agent_id IS NOT ?",
+            (agent_id, label, agent_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def touch_bus_token(self, token_hash: str):
         """更新 last_used_ts. 容错: 失败不抛."""
         try:

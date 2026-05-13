@@ -64,12 +64,15 @@ def _bootstrap_tokens(db: MasterDB, db_path: str) -> list[tuple[str, str]]:
     返本次新颁发的 [(label, raw)] 列表 (空 = 全 6 都已存在).
     新 raw append 到 initial_tokens.txt; env sync 由 _sync_env_from_initial_tokens 统一处理.
     """
+    # mcp-default 绑 node prefix (本机 node_id, 默认 "local"). auth.py 把不含 '.'
+    # 的 agent_id 当 prefix 校验, 单 token 服务本机所有 agent. 远端跨 node 仍可
+    # token issue --agent-id <full.id> 发严格 binding 的 mcp token.
+    _mcp_default_prefix = os.environ.get("PRE_NODE_ID", "local")
     defaults = [
         ("node-default",     "node",     None),
         ("operator-default", "operator", None),
         ("cli-default",      "cli",      None),
-        # mcp-default 不绑 agent_id (deploy-time 用 token issue --agent-id 再发针对性)
-        ("mcp-default",      "mcp",      None),
+        ("mcp-default",      "mcp",      _mcp_default_prefix),
         # gui-default → pre_ui browser, master 颁发后通过 magic link 落 localStorage
         ("gui-default",      "gui",      None),
         # hook-default → hook/runtime 模块走本机 loopback 调 master HTTP
@@ -276,6 +279,30 @@ def _sync_capability_from_initial_tokens(db_path: str) -> list[str]:
     return added
 
 
+def _migrate_mcp_default_binding(db: MasterDB) -> str | None:
+    """Idempotent: 如果 mcp-default 还是老的 agent_id=NULL (无 binding), 升到 node prefix.
+
+    存量 db 在 node-prefix binding 上线前 bootstrap, mcp-default 无 binding,
+    send_message 会被 auth.py 拒为 "mcp_token_missing_agent_id_binding". 这里
+    把它升级成 PRE_NODE_ID prefix (默认 "local"), raw 不变, ~/.pre/env 不动.
+
+    返升级后的 agent_id (若发生升级), 否则 None.
+    """
+    prefix = os.environ.get("PRE_NODE_ID", "local")
+    # 找现有 mcp-default
+    cur = None
+    for t in db.list_bus_tokens(include_revoked=False):
+        if t["label"] == "mcp-default":
+            cur = t
+            break
+    if not cur:
+        return None  # 还没 bootstrap, _bootstrap_tokens 会直接发对的
+    if cur.get("agent_id"):
+        return None  # 已经有 binding (升级过或 deploy-time 改过), 不动
+    changed = db.update_bus_token_agent_id("mcp-default", prefix)
+    return prefix if changed else None
+
+
 def _print_magic_link(gui_raw: str):
     link = _magic_link(gui_raw)
     print(file=sys.stderr)
@@ -320,6 +347,8 @@ def main():
     # bootstrap (idempotent — 缺哪个 default label 补哪个)
     db = MasterDB(args.db)
     issued = _bootstrap_tokens(db, args.db)
+    # 存量 db 升级: mcp-default 老的无 binding 一次性升到 node prefix
+    mcp_migrated = _migrate_mcp_default_binding(db)
     db.conn.close()  # 让 run_master 自己重新打开 (避免共享 connection)
 
     # env sync (扫 initial_tokens.txt 补 env 缺的 PRE_<KIND>_SECRET)
@@ -351,6 +380,13 @@ def main():
               file=sys.stderr)
         for label in synced_cap:
             print(f"{C_BLUE}[master]   {label}{C_RESET}", file=sys.stderr)
+
+    if mcp_migrated:
+        print(f"{C_MAGENTA}[master] ━━━ migrate: mcp-default agent_id 升级到 node prefix "
+              f"'{mcp_migrated}' ━━━{C_RESET}", file=sys.stderr)
+        print(f"{C_BLUE}[master]   send_message 现按 from_agent 前缀 "
+              f"'{mcp_migrated}.' 校验, raw token / PRE_MCP_SECRET 不变{C_RESET}",
+              file=sys.stderr)
 
     # magic link: 优先 issued gui (新颁发), 否则 synced gui (db 已有但 env 刚补)
     gui_raw = next((raw for lb, raw in issued if lb == "gui-default"), None)

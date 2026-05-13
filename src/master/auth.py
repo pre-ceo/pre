@@ -5,7 +5,11 @@ auth — multi-token RBAC: 校验 Bearer + role/scope 检查.
   - master 持 sha256 hash, 不持 raw
   - 每 token 一行 bus_tokens 表 row (label/role/scopes/agent_id/timestamps)
   - role-based scope 检查 (第一期粗颗): 4 个 role 各配默认 scopes
-  - mcp token 携带 agent_id 锁定: from_agent 必等于 token 绑定 agent_id
+  - mcp token 的 agent_id 字段两种语义:
+      含 '.' → 完整 agent_id, from_agent 必精确相等 (跨 node deploy-time 严格绑定)
+      不含 '.' → node prefix, from_agent 必以 "<prefix>." 开头
+                  (本机一 token 服务同 node 多 agent; 仍堵跨 node 冒充)
+      为空    → 拒所有携带 from_agent 的请求 (e.g. send_message)
 
 Fail-closed: 任何异常 → 拒. 不留 legacy `--secret` env 后门.
 
@@ -132,13 +136,19 @@ def verify_token(db, raw_bearer: str, required_scope: str = "",
     if required_scope and not has_scope(entry.get("scopes", []), required_scope):
         return False, f"scope_denied:{required_scope}", {}
 
-    # mcp token 身份锁定
+    # mcp token 身份锁定 (两种 binding 语义见模块 docstring)
     if from_agent is not None and role == "mcp":
         bound = entry.get("agent_id") or ""
         if not bound:
             return False, "mcp_token_missing_agent_id_binding", {}
-        if from_agent != bound:
-            return False, f"mcp_from_agent_mismatch:{from_agent}_vs_{bound}", {}
+        if '.' in bound:
+            # 完整 agent_id binding: 严格相等
+            if from_agent != bound:
+                return False, f"mcp_from_agent_mismatch:{from_agent}_vs_{bound}", {}
+        else:
+            # node prefix binding: from_agent 必以 "<prefix>." 开头
+            if not from_agent.startswith(f"{bound}."):
+                return False, f"mcp_from_agent_prefix_mismatch:{from_agent}_vs_{bound}.*", {}
 
     # 命中 → 顺便 touch last_used_ts (容错)
     try:
