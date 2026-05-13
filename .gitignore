@@ -10,7 +10,7 @@ __pycache__/
 master.db
 
 # Local config / runtime state
-config.json
+/config.json
 agents/
 logs/
 .claude/

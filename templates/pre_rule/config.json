@@ -1,0 +1,5 @@
+{
+  "mode": "enforce",
+  "governor_provider": "gemini",
+  "governor_timeout": 60
+}
