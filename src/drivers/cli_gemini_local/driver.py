@@ -611,41 +611,56 @@ class CliGeminiLocalDriver(BaseDriver):
                     return result
 
         cfg_path = os.path.join(pre_dir, "agent_config.json")
-        if os.path.isfile(cfg_path):
+        existing: dict = {}
+        existing_present = os.path.isfile(cfg_path)
+        if existing_present:
             try:
                 with open(cfg_path) as f:
-                    existing = json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        existing = loaded
             except (OSError, json.JSONDecodeError) as e:
                 result.failures.append(f"existing {cfg_path} unreadable: {e}")
                 return result
-            existing_cli = existing.get("cli") or "claude"
-            if existing_cli != "gemini":
+            existing_cli = existing.get("cli")
+            if existing_cli and existing_cli != "gemini":
                 result.conflicts.append(
                     f"{cfg_path} cli={existing_cli}; refuse to overwrite "
                     f"(this cwd belongs to a non-gemini driver)"
                 )
                 return result
+
+        # preserve 用户字段, force driver-owned 字段. mcp.server 强 normalize "pre"
+        # 防止 stale "fn_pre" 等老值保留.
+        cfg = dict(existing)
+        cfg["cli"] = "gemini"
+        cfg["driver_type"] = self.type_name
+        cfg.setdefault("mode", mode)
+        cfg.setdefault("tmux_session", tmux_session)
+        cfg.setdefault("project_name", project_name)
+        cfg.setdefault("start_command", "gemini")
+        if opts.get("model"):
+            cfg["model"] = opts["model"]
+        if opts.get("role"):
+            cfg["role"] = opts["role"]
+        mcp_block = cfg.get("mcp")
+        if not isinstance(mcp_block, dict):
+            mcp_block = {}
+        mcp_block["server"] = "pre"
+        mcp_block["caller_agent_id"] = agent_id
+        cfg["mcp"] = mcp_block
+
+        if existing_present and cfg == existing:
             result.skipped.append(cfg_path)
         else:
-            cfg = {
-                "cli": "gemini",
-                # driver_type 跟 type_name 一致, pre_mcp _caller_from_agent_config
-                # fallback 用它拼 caller_agent_id (3 段式 <node>.<driver>.<project>).
-                "driver_type": self.type_name,
-                "mode": mode,
-                "tmux_session": tmux_session,
-                "project_name": project_name,
-                "start_command": "gemini",
-            }
-            if opts.get("model"):
-                cfg["model"] = opts["model"]
-            if opts.get("role"):
-                cfg["role"] = opts["role"]
             try:
                 with open(cfg_path, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
                     f.write("\n")
-                result.created.append(cfg_path)
+                if existing_present:
+                    result.created.append(f"{cfg_path} (normalized)")
+                else:
+                    result.created.append(cfg_path)
             except OSError as e:
                 result.failures.append(f"write {cfg_path}: {e}")
                 return result

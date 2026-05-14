@@ -114,13 +114,23 @@ def _repair_agent_config(target_dir: str, opts: dict) -> tuple[str, str]:
     new["tmux_session"] = (
         opts.get("tmux_session") or existing.get("tmux_session") or fallback_name
     )
-    new["project_name"] = (
+    project_name = (
         opts.get("project_name") or existing.get("project_name") or fallback_name
     )
+    new["project_name"] = project_name
     if opts.get("model"):
         new["model"] = opts["model"]
     if opts.get("role"):
         new["role"] = opts["role"]
+
+    # mcp 块 normalize: server 强制 "pre" (清掉 fn_pre 等 stale 值);
+    # caller_agent_id 强制 {node}.{driver}.{project}, 跟 driver discover 用的
+    # agent_id 对齐, 不依赖 pre_mcp/tools.py 的 driver_type+project_name fallback.
+    node_id = os.environ.get("PRE_NODE_ID", "local")
+    mcp_block = new.get("mcp") if isinstance(new.get("mcp"), dict) else {}
+    mcp_block["server"] = "pre"
+    mcp_block["caller_agent_id"] = f"{node_id}.{driver_type}.{project_name}"
+    new["mcp"] = mcp_block
 
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(new, f, indent=2, ensure_ascii=False)

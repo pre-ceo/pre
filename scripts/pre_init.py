@@ -19,6 +19,7 @@ exit 0 = ok, 1 = 有 conflict / failure / tmux 未起.
 """
 import argparse
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -74,6 +75,43 @@ async def _run(driver_cls, target_dir: str, opts: dict):
     return await driver.init_agent(target_dir, opts)
 
 
+def _existing_cli(target_dir: str) -> str:
+    """读 cwd/pre/agent_config.json 的 cli 字段. 缺/坏返 ""."""
+    cfg_path = os.path.join(target_dir, "pre", "agent_config.json")
+    if not os.path.isfile(cfg_path):
+        return ""
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(cfg, dict):
+        return ""
+    cli = cfg.get("cli")
+    return cli if isinstance(cli, str) and cli in _DRIVERS else ""
+
+
+def _prompt_driver() -> str:
+    """tty 交互选 driver. 非 tty 调用方应先 SystemExit."""
+    print(f"{C_YELLOW}新项目无 agent_config.json, 选一个 driver:{C_RESET}")
+    print("  1. claude  (cli-claude-code-local)")
+    print("  2. codex   (cli-codex-local)")
+    print("  3. gemini  (cli-gemini-local)")
+    mapping = {"1": "claude", "claude": "claude",
+               "2": "codex",  "codex":  "codex",
+               "3": "gemini", "gemini": "gemini"}
+    while True:
+        try:
+            ans = input("选 1/2/3 (or 'q' 退): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\nuser cancelled")
+        if ans in ("q", "quit", "exit"):
+            raise SystemExit("user cancelled")
+        if ans in mapping:
+            return mapping[ans]
+        print(f"{C_YELLOW}请选 1/2/3 或输 claude/codex/gemini{C_RESET}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Initialize an agent (claude/codex/gemini) in target_dir (idempotent).",
@@ -82,9 +120,10 @@ def main() -> int:
     )
     p.add_argument("target_dir", nargs="?", default=os.getcwd(),
                    help="absolute path to agent cwd (default: current dir)")
-    p.add_argument("--driver", default="claude",
+    p.add_argument("--driver", default=None,
                    choices=sorted(_DRIVERS.keys()),
-                   help="cli driver: claude (default) | codex | gemini")
+                   help="cli driver: claude | codex | gemini. 新项目必传 "
+                        "(或 tty 下交互选). 已有 agent_config.cli 时可省 (honor existing).")
     p.add_argument("--mode", default="supervised",
                    choices=["supervised", "autonomous", "freerun"])
     p.add_argument("--tmux-session", default=None,
@@ -99,6 +138,33 @@ def main() -> int:
     args = p.parse_args()
 
     target_dir = os.path.abspath(args.target_dir)
+
+    # driver 决定: explicit flag > existing agent_config.cli > prompt (tty) > error.
+    driver_key = args.driver
+    if driver_key is None:
+        driver_key = _existing_cli(target_dir)
+        if driver_key:
+            print(f"{C_DIM}driver: {driver_key} (from existing agent_config.cli){C_RESET}")
+        else:
+            if not sys.stdin.isatty():
+                print(
+                    f"{C_YELLOW}target_dir 没有 agent_config.json 且未传 --driver. "
+                    f"非交互环境必须显式: pre init --driver claude|codex|gemini{C_RESET}",
+                    file=sys.stderr,
+                )
+                return 2
+            driver_key = _prompt_driver()
+    elif driver_key:
+        # 显式 --driver, 但 existing cli 跟它不一致 → 早报错 (driver.init_agent 也会
+        # report conflict, 但这里 fail-fast 给用户清晰提示).
+        ex_cli = _existing_cli(target_dir)
+        if ex_cli and ex_cli != driver_key:
+            print(
+                f"{C_YELLOW}cli mismatch: agent_config.cli={ex_cli} 但 --driver={driver_key}. "
+                f"要换 driver 用 `pre repair --driver {driver_key}` (会覆盖){C_RESET}",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.tmux_session is None:
         ts = _detect_tmux_session() or (os.path.basename(target_dir.rstrip("/")) or "agent")
@@ -118,10 +184,10 @@ def main() -> int:
     if args.role:
         opts["role"] = args.role
 
-    driver_cls = _DRIVERS[args.driver]
+    driver_cls = _DRIVERS[driver_key]
 
     print(f"{C_MAGENTA}━━━ pre-init: {os.path.basename(target_dir) or '/'} ━━━{C_RESET}")
-    print(f"{C_DIM}driver: {args.driver} ({driver_cls.__name__}){C_RESET}")
+    print(f"{C_DIM}driver: {driver_key} ({driver_cls.__name__}){C_RESET}")
     print(f"{C_DIM}target: {target_dir}{C_RESET}")
     print(f"{C_DIM}tmux:   {ts}{C_RESET}")
     print(f"{C_DIM}mode:   {args.mode}{C_RESET}\n")

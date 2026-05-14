@@ -658,40 +658,57 @@ class CliClaudeCodeLocalDriver(BaseDriver):
                     return result
 
         cfg_path = os.path.join(pre_dir, "agent_config.json")
-        if os.path.isfile(cfg_path):
+        existing: dict = {}
+        existing_present = os.path.isfile(cfg_path)
+        if existing_present:
             try:
                 with open(cfg_path) as f:
-                    existing = json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        existing = loaded
             except (OSError, json.JSONDecodeError) as e:
                 result.failures.append(f"existing {cfg_path} unreadable: {e}")
                 return result
-            existing_cli = existing.get("cli") or "claude"
-            if existing_cli != "claude":
+            existing_cli = existing.get("cli")
+            if existing_cli and existing_cli != "claude":
                 result.conflicts.append(
                     f"{cfg_path} cli={existing_cli}; refuse to overwrite "
                     f"(this cwd belongs to a non-claude driver)"
                 )
                 return result
+
+        # preserve 用户字段, force driver-owned 字段 (cli/driver_type +
+        # mcp.server="pre" + mcp.caller_agent_id={node}.{driver}.{project}).
+        # 关键: 老 backfill 可能在 mcp.server 写过 "fn_pre" 等 stale 值,
+        # 即使 pre_mcp/tools.py 不读这字段, 也要强 normalize 防止下次误归因.
+        cfg = dict(existing)
+        cfg["cli"] = "claude"
+        cfg["driver_type"] = self.type_name
+        cfg.setdefault("mode", mode)
+        cfg.setdefault("tmux_session", tmux_session)
+        cfg.setdefault("project_name", project_name)
+        if opts.get("model"):
+            cfg["model"] = opts["model"]
+        if opts.get("role"):
+            cfg["role"] = opts["role"]
+        mcp_block = cfg.get("mcp")
+        if not isinstance(mcp_block, dict):
+            mcp_block = {}
+        mcp_block["server"] = "pre"
+        mcp_block["caller_agent_id"] = agent_id
+        cfg["mcp"] = mcp_block
+
+        if existing_present and cfg == existing:
             result.skipped.append(cfg_path)
         else:
-            cfg = {
-                "cli": "claude",
-                # driver_type 跟 type_name 一致, pre_mcp _caller_from_agent_config
-                # fallback 用它拼 caller_agent_id (3 段式 <node>.<driver>.<project>).
-                "driver_type": self.type_name,
-                "mode": mode,
-                "tmux_session": tmux_session,
-                "project_name": project_name,
-            }
-            if opts.get("model"):
-                cfg["model"] = opts["model"]
-            if opts.get("role"):
-                cfg["role"] = opts["role"]
             try:
                 with open(cfg_path, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
                     f.write("\n")
-                result.created.append(cfg_path)
+                if existing_present:
+                    result.created.append(f"{cfg_path} (normalized)")
+                else:
+                    result.created.append(cfg_path)
             except OSError as e:
                 result.failures.append(f"write {cfg_path}: {e}")
                 return result
