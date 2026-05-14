@@ -12,6 +12,7 @@
   status               整体组件状态 (bus subsystems + cron schedules + wiring)
   usage <action>       usage subsystem (sys_* tmux + cron probe):
                        install — spawn sys_* + ensure schedule + verify
+  teach [target]       发 pre 教程给 agent (target=me|<agent_id>, 走 bus + 写 cwd/pre/teach.md)
   bus <action> [tgt]   管理 master/node/ui/cron daemon (= bus_ctl.sh):
                        start | stop | restart | status | logs | attach | sync
 
@@ -73,6 +74,12 @@ def _cmd_spawn(rest):
 def _cmd_bus(rest):
     bus_sh = os.path.join(_HERE, "bus_ctl.sh")
     return subprocess.call(["bash", bus_sh] + rest)
+
+
+def _cmd_teach(rest):
+    import pre_teach
+    sys.argv = ["pre teach"] + rest
+    return pre_teach.main()
 
 
 def _resolve_rule_root() -> str:
@@ -534,6 +541,7 @@ _COMMANDS = {
     "bus": _cmd_bus,
     "status": _cmd_status,
     "usage": _cmd_usage,
+    "teach": _cmd_teach,
 }
 
 
@@ -551,6 +559,7 @@ def _usage():
     print("  status               overall component status (subsystems + cron + wiring)")
     print("  usage <action>       usage subsystem (sys_* tmux + cron probe)")
     print("                       actions: install")
+    print("  teach [target]       send pre tutorial to agent (target=me|<agent_id>)")
     print("  bus <action> [tgt]   manage master/node/ui/cron daemons")
     print("                       actions: start|stop|restart|status|logs|attach|sync")
     print()

@@ -25,6 +25,7 @@ logs/
 /pre/transcript_path.txt
 /pre/findings/
 /pre/reports/
+/pre/teach.md
 
 # OS / editor
 .DS_Store
