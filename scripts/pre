@@ -10,6 +10,8 @@
   rm <id|dir>          删除 pre_rule/agents/<dir>/ 索引 (不动 cwd)
   list                 列所有 discover_agents 结果 + 状态
   status               整体组件状态 (bus subsystems + cron schedules + wiring)
+  usage <action>       usage subsystem (sys_* tmux + cron probe):
+                       install — spawn sys_* + ensure schedule + verify
   bus <action> [tgt]   管理 master/node/ui/cron daemon (= bus_ctl.sh):
                        start | stop | restart | status | logs | attach | sync
 
@@ -316,6 +318,183 @@ def _print_wiring_status():
         print(f"{C_YELLOW}[mcp]{C_RESET}       {claude_json} unreadable: {e}")
 
 
+def _ensure_usage_schedule(sched_path: str) -> tuple[str, str]:
+    """确保 schedules.json 含 pre_usage_probe entry.
+
+    返 (status, detail):
+      ("exists",  path)  — entry 已在, 不动
+      ("added",   path)  — 文件存在但缺 entry, append
+      ("created", path)  — 文件不存在, 全新写
+      ("error",   msg)   — read/write 失败
+    """
+    entry = {
+        "id": "pre_usage_probe",
+        "_desc": "15min 抓 sys_claude/sys_gemini/sys_codex 配额; 同时做 sys_* 保活.",
+        "type": "interval",
+        "every_seconds": 900,
+        "enabled": True,
+        "target_node": "local",
+        "cmd": ["uv", "run", "python", "scripts/usage_probe_once.py"],
+        "cwd": _PRE_ROOT,
+        "env": {"PRE_MASTER_URL": "http://127.0.0.1:19500"},
+    }
+    try:
+        os.makedirs(os.path.dirname(sched_path), exist_ok=True)
+    except OSError as e:
+        return "error", f"mkdir failed: {e}"
+
+    if not os.path.isfile(sched_path):
+        doc = {"version": 1, "schedules": [entry]}
+        try:
+            with open(sched_path, "w", encoding="utf-8") as f:
+                json.dump(doc, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+        except OSError as e:
+            return "error", f"write failed: {e}"
+        return "created", sched_path
+
+    try:
+        with open(sched_path, encoding="utf-8") as f:
+            doc = json.load(f)
+        if not isinstance(doc, dict):
+            return "error", f"{sched_path} root is not object"
+        if not isinstance(doc.get("schedules"), list):
+            doc["schedules"] = []
+    except (OSError, json.JSONDecodeError) as e:
+        return "error", f"read failed: {e}"
+
+    for s in doc["schedules"]:
+        if isinstance(s, dict) and s.get("id") == "pre_usage_probe":
+            return "exists", sched_path
+
+    doc["schedules"].append(entry)
+    try:
+        with open(sched_path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except OSError as e:
+        return "error", f"write failed: {e}"
+    return "added", sched_path
+
+
+def _cmd_usage(rest):
+    """pre usage <action> — usage subsystem 运维 (sys_* tmux + cron probe).
+
+    Actions:
+      install   一次性装齐 usage subsystem (sys_claude/codex/gemini tmux +
+                确认 cron schedule + 默认立即 probe verify).
+    """
+    if not rest or rest[0] in ("-h", "--help", "help"):
+        print("usage: pre usage <action> [args...]")
+        print()
+        print("actions:")
+        print("  install   spawn sys_claude/codex/gemini tmux + verify cron schedule + probe")
+        print()
+        print("`pre usage install --help` for action-level flags.")
+        return 0
+    action = rest[0]
+    if action == "install":
+        return _do_usage_install(rest[1:])
+    print(f"unknown usage action: {action}", file=sys.stderr)
+    return 2
+
+
+def _do_usage_install(rest):
+    """install: 起 sys_* tmux + 确认 cron schedule + 立即 probe."""
+    p = argparse.ArgumentParser(
+        prog="pre usage install",
+        description="装齐 usage subsystem: spawn sys_claude/codex/gemini tmux, "
+                    "确认 cron schedule, 立即跑一次 probe verify.",
+    )
+    p.add_argument("--provider", action="append", default=None,
+                   choices=["claude", "codex", "gemini"],
+                   help="只装某个 provider (可重复); 不传则装全部 3 家")
+    p.add_argument("--force-respawn", action="store_true",
+                   help="即使 sys_* tmux 已存在也 kill 重起")
+    p.add_argument("--no-probe", action="store_true",
+                   help="装完不立即 trigger probe verify (默认会跑一次)")
+    args = p.parse_args(rest)
+    providers = args.provider or ["claude", "codex", "gemini"]
+
+    print(f"{C_MAGENTA}━━━ pre usage install ━━━{C_RESET}")
+    print(f"{C_DIM}providers: {','.join(providers)}{C_RESET}\n")
+
+    # 1. master 必须在跑 (cron loop 嵌在 master 进程里)
+    bus_sh = os.path.join(_HERE, "bus_ctl.sh")
+    bus_r = subprocess.run(["bash", bus_sh, "status"],
+                           capture_output=True, text=True, timeout=10)
+    master_ok = ("master port:" in bus_r.stdout and "listening" in bus_r.stdout)
+    if master_ok:
+        print(f"{C_CYAN}[ok]{C_RESET}      bus master alive (:19500 listening)")
+    else:
+        print(f"{C_YELLOW}[warn]{C_RESET}    bus master 不像在跑 — 先跑 `pre bus start`, "
+              f"否则 cron loop 不跑")
+
+    # 2. cron schedule ensure — 没有就 append/create, 已有就跳过.
+    #    master 内嵌 cron 30s tick hot-reload, 不用重启.
+    rule_root = _resolve_rule_root()
+    sched_path = os.path.join(rule_root, "cron", "schedules.json")
+    status, detail = _ensure_usage_schedule(sched_path)
+    if status == "exists":
+        print(f"{C_CYAN}[ok]{C_RESET}      cron schedule pre_usage_probe present "
+              f"{C_DIM}({sched_path}){C_RESET}")
+    elif status == "added":
+        print(f"{C_CYAN}[added]{C_RESET}   cron schedule pre_usage_probe written "
+              f"{C_DIM}({sched_path}){C_RESET}")
+    elif status == "created":
+        print(f"{C_CYAN}[created]{C_RESET} {sched_path} with pre_usage_probe entry")
+    else:
+        print(f"{C_YELLOW}[warn]{C_RESET}    schedule write failed: {detail}")
+
+    # 3. spawn sys_* tmux (复用 usage_probe_once._respawn)
+    print()
+    print(f"{C_MAGENTA}━━ spawn sys_* tmux ━━{C_RESET}")
+    try:
+        from usage_probe_once import _respawn  # noqa: E402
+    except ImportError as e:
+        print(f"{C_YELLOW}[error]{C_RESET}   import usage_probe_once 失败: {e}")
+        return 1
+
+    all_spawned = True
+    for prov in providers:
+        ok, msg = _respawn(prov, force_kill=args.force_respawn)
+        if ok:
+            print(f"{C_CYAN}[ok]{C_RESET}      sys_{prov}: {msg}")
+        else:
+            print(f"{C_YELLOW}[fail]{C_RESET}    sys_{prov}: {msg}")
+            all_spawned = False
+
+    # 4. 立即 trigger 一次 probe verify (除非 --no-probe)
+    if not args.no_probe:
+        print()
+        print(f"{C_MAGENTA}━━ verify: 立即跑一次 probe ━━{C_RESET}")
+        env = os.environ.copy()
+        env.setdefault("PRE_MASTER_URL", "http://127.0.0.1:19500")
+        probe_script = os.path.join(_HERE, "usage_probe_once.py")
+        try:
+            r = subprocess.run(
+                ["uv", "run", "python", probe_script],
+                env=env, cwd=_PRE_ROOT, capture_output=True, text=True, timeout=90,
+            )
+            lines = (r.stdout or "").splitlines()
+            tail = lines[-10:] if len(lines) > 10 else lines
+            for line in tail:
+                print(f"  {C_DIM}{line}{C_RESET}")
+            if r.returncode != 0:
+                print(f"{C_YELLOW}[warn]{C_RESET}    probe exited rc={r.returncode}")
+                if r.stderr:
+                    print(f"  {C_DIM}stderr: {r.stderr[-200:]}{C_RESET}")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"{C_YELLOW}[warn]{C_RESET}    probe failed: {e}")
+
+    print()
+    print(f"{C_CYAN}━━━ done ━━━{C_RESET}")
+    if not all_spawned:
+        print(f"{C_DIM}部分 sys_* 没起来, 检查 ~/.pre/sys_workdir 或 spawn.rc{C_RESET}")
+        return 1
+    return 0
+
+
 def _cmd_status(rest):
     """显示 pre 整体组件状态: subsystems (bus) + cron schedules + wiring."""
     p = argparse.ArgumentParser(
@@ -354,6 +533,7 @@ _COMMANDS = {
     "list": _cmd_list,
     "bus": _cmd_bus,
     "status": _cmd_status,
+    "usage": _cmd_usage,
 }
 
 
@@ -369,6 +549,8 @@ def _usage():
     print("  rm <id|dir>          remove pre_rule/agents/<dir>/ index (cwd untouched)")
     print("  list                 list all discovered agents with status")
     print("  status               overall component status (subsystems + cron + wiring)")
+    print("  usage <action>       usage subsystem (sys_* tmux + cron probe)")
+    print("                       actions: install")
     print("  bus <action> [tgt]   manage master/node/ui/cron daemons")
     print("                       actions: start|stop|restart|status|logs|attach|sync")
     print()
