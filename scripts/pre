@@ -9,6 +9,7 @@
   spawn <id>           起 tmux session + 通知 master rediscover (= spawn_agent.sh)
   rm <id|dir>          删除 pre_rule/agents/<dir>/ 索引 (不动 cwd)
   list                 列所有 discover_agents 结果 + 状态
+  status               整体组件状态 (bus subsystems + cron schedules + wiring)
   bus <action> [tgt]   管理 master/node/ui/cron daemon (= bus_ctl.sh):
                        start | stop | restart | status | logs | attach | sync
 
@@ -226,6 +227,123 @@ def _cmd_list(rest):
     return 0
 
 
+def _print_cron_status():
+    """cron schedules 状态 — master 内嵌 cron loop 读 pre_rule/cron/schedules.json."""
+    rule_root = _resolve_rule_root()
+    sched_path = os.path.join(rule_root, "cron", "schedules.json")
+    print(f"{C_MAGENTA}━━━ cron schedules ━━━{C_RESET}")
+    if not os.path.isfile(sched_path):
+        print(f"{C_DIM}[no schedules]  {sched_path} not found{C_RESET}")
+        return
+    try:
+        with open(sched_path, encoding="utf-8") as f:
+            doc = json.load(f)
+        schedules = doc.get("schedules") or []
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"{C_YELLOW}[error]{C_RESET}     {sched_path}: {e}")
+        return
+    total = len(schedules)
+    enabled = sum(1 for s in schedules if s.get("enabled", True))
+    print(f"{C_CYAN}[schedules]{C_RESET} {enabled} enabled / {total} total "
+          f"{C_DIM}({sched_path}){C_RESET}")
+    for s in schedules:
+        sid = s.get("id", "?")
+        en = s.get("enabled", True)
+        typ = s.get("type", "?")
+        node = s.get("target_node", "local")
+        if typ == "interval":
+            spec = f"every={s.get('every_seconds')}s"
+        elif typ == "daily":
+            spec = f"at={s.get('at', '?')}"
+        else:
+            spec = f"type={typ}"
+        flag = f"{C_CYAN}●{C_RESET}" if en else f"{C_DIM}○{C_RESET}"
+        print(f"  {flag} {sid}  {C_DIM}({spec}, node={node}){C_RESET}")
+
+
+def _print_wiring_status():
+    """wiring 状态: ~/.local/bin shims + ~/.pre/env tokens + ~/.claude.json mcp 注册."""
+    print(f"{C_MAGENTA}━━━ wiring ━━━{C_RESET}")
+
+    shim_dir = os.path.expanduser("~/.local/bin")
+    expected_shims = ["pre", "pre-mcp", "pre-tool-use", "pre-stop-hook"]
+    shim_missing = [s for s in expected_shims
+                    if not (os.path.isfile(os.path.join(shim_dir, s))
+                            and os.access(os.path.join(shim_dir, s), os.X_OK))]
+    if not shim_missing:
+        print(f"{C_CYAN}[shims]{C_RESET}     ok  {C_DIM}({len(expected_shims)} in {shim_dir}){C_RESET}")
+    else:
+        print(f"{C_YELLOW}[shims]{C_RESET}     missing: {', '.join(shim_missing)} "
+              f"{C_DIM}— run scripts/install.sh{C_RESET}")
+
+    env_path = os.path.expanduser("~/.pre/env")
+    expected_envs = ["PRE_NODE_SECRET", "PRE_MCP_SECRET", "PRE_HOOK_SECRET",
+                     "PRE_GUI_SECRET", "PRE_OPERATOR_SECRET"]
+    env_present, env_missing = [], list(expected_envs)
+    if os.path.isfile(env_path):
+        try:
+            content = open(env_path, encoding="utf-8").read()
+            lines = content.splitlines()
+            env_present = [e for e in expected_envs
+                           if any(line.strip().startswith(f"{e}=") for line in lines)]
+            env_missing = [e for e in expected_envs if e not in env_present]
+        except OSError:
+            pass
+    if not env_missing:
+        print(f"{C_CYAN}[env]{C_RESET}       ok  {C_DIM}({len(env_present)}/{len(expected_envs)} tokens, {env_path}){C_RESET}")
+    elif not env_present:
+        print(f"{C_YELLOW}[env]{C_RESET}       {env_path} missing or no tokens "
+              f"{C_DIM}— run scripts/pre_token.py issue{C_RESET}")
+    else:
+        print(f"{C_YELLOW}[env]{C_RESET}       partial — missing: {', '.join(env_missing)} "
+              f"{C_DIM}({env_path}){C_RESET}")
+
+    claude_json = os.path.expanduser("~/.claude.json")
+    if not os.path.isfile(claude_json):
+        print(f"{C_YELLOW}[mcp]{C_RESET}       {claude_json} not found")
+        return
+    try:
+        with open(claude_json, encoding="utf-8") as f:
+            data = json.load(f)
+        servers = data.get("mcpServers", {})
+        if isinstance(servers, dict) and isinstance(servers.get("pre"), dict):
+            cmd = servers["pre"].get("command", "?")
+            print(f"{C_CYAN}[mcp]{C_RESET}       ok  {C_DIM}(mcpServers.pre command={cmd}){C_RESET}")
+        else:
+            print(f"{C_YELLOW}[mcp]{C_RESET}       mcpServers.pre missing "
+                  f"{C_DIM}— run scripts/install_mcp_registration.py{C_RESET}")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"{C_YELLOW}[mcp]{C_RESET}       {claude_json} unreadable: {e}")
+
+
+def _cmd_status(rest):
+    """显示 pre 整体组件状态: subsystems (bus) + cron schedules + wiring."""
+    p = argparse.ArgumentParser(
+        prog="pre status",
+        description="Show overall pre status: subsystems (master/node/ui/cron tmux + "
+                    "ports), cron schedules, wiring (shims/env/mcp registration).",
+    )
+    p.add_argument("--no-wiring", action="store_true",
+                   help="跳过 shim/env/mcp 检查, 只看运行时 subsystems + cron")
+    p.add_argument("--no-cron", action="store_true",
+                   help="跳过 cron schedules block")
+    args = p.parse_args(rest)
+
+    bus_sh = os.path.join(_HERE, "bus_ctl.sh")
+    rc = subprocess.call(["bash", bus_sh, "status"])
+    if rc != 0:
+        return rc
+
+    if not args.no_cron:
+        print()
+        _print_cron_status()
+    if not args.no_wiring:
+        print()
+        _print_wiring_status()
+
+    return 0
+
+
 _COMMANDS = {
     "init": _cmd_init,
     "migrate": _cmd_migrate,
@@ -235,6 +353,7 @@ _COMMANDS = {
     "rm": _cmd_rm,
     "list": _cmd_list,
     "bus": _cmd_bus,
+    "status": _cmd_status,
 }
 
 
@@ -249,6 +368,7 @@ def _usage():
     print("  spawn <id>           start tmux session for agent_id + notify master")
     print("  rm <id|dir>          remove pre_rule/agents/<dir>/ index (cwd untouched)")
     print("  list                 list all discovered agents with status")
+    print("  status               overall component status (subsystems + cron + wiring)")
     print("  bus <action> [tgt]   manage master/node/ui/cron daemons")
     print("                       actions: start|stop|restart|status|logs|attach|sync")
     print()
