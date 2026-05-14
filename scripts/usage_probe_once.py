@@ -339,20 +339,36 @@ def _respawn(provider: str, force_kill: bool = False) -> tuple[bool, str]:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False, "post-spawn check failed"
 
-    # claude code v2 第一次进入新 cwd 会弹 "Quick safety check / Yes, I trust this folder",
-    # 默认指针在 1. Yes, 直接 Enter 即可 confirm. 必须 confirm 否则 /usage 抓不到.
-    # gemini / codex 没这个弹窗, 此 capture 命中也无害.
-    try:
-        cap = subprocess.run(["tmux", "capture-pane", "-t", session, "-p"],
-                             capture_output=True, text=True, timeout=3)
+    # 3 个 driver 首次进入新 cwd 都会弹 trust prompt, wording 各不同 (2026-05-15
+    # observation, sys_workdir 已 trust 时不会弹). 默认指针都在第 1 个 "信任", 直
+    # 接 Enter 即可 confirm. 必须 confirm 否则 /usage 抓不到. provider-agnostic 扫
+    # 所有 pattern, 多 retry 给 CLI 渲染时间.
+    _TRUST_PATTERNS = (
+        # claude code
+        "trust this folder", "Quick safety check",
+        # gemini cli
+        "Do you trust the files in this folder", "Trust folder",
+        # codex cli
+        "Do you trust the contents of this directory", "Yes, continue",
+    )
+    for attempt in range(3):  # 3 次 retry, 总 ~6s, 覆盖慢启动
+        try:
+            cap = subprocess.run(["tmux", "capture-pane", "-t", session, "-p"],
+                                 capture_output=True, text=True, timeout=3)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            break
         pane_text = cap.stdout or ""
-        if "trust this folder" in pane_text or "Quick safety check" in pane_text:
-            subprocess.run(["tmux", "send-keys", "-t", session, "Enter"],
-                           capture_output=True, timeout=3)
+        if any(p in pane_text for p in _TRUST_PATTERNS):
+            try:
+                subprocess.run(["tmux", "send-keys", "-t", session, "Enter"],
+                               capture_output=True, timeout=3)
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
             time.sleep(2)
-            print(f"[probe-spawn] {provider}: auto-confirmed trust dialog", flush=True)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+            print(f"[probe-spawn] {provider}: auto-confirmed trust dialog "
+                  f"(attempt {attempt + 1})", flush=True)
+            break
+        time.sleep(2)
 
     return True, "ok"
 
