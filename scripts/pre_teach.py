@@ -4,14 +4,14 @@
 用法:
   pre teach me                # cwd/pre/agent_config.json 推 caller, 给自己
   pre teach <agent_id>        # 给指定 agent
-  pre teach me --no-bus       # 不走 bus, 只写文件 + stdout
-  pre teach me --no-stdout    # 只走 bus + 文件, 不 stdout
-  pre teach me --no-file      # 不写 cwd/pre/teach.md, 只 stdout/bus
+  pre teach me --no-bus       # 不走 bus, 只写文件 (默认不 stdout)
+  pre teach me --stdout       # 显式 stdout 全文 (默认 off, 避免跟 bus 重复)
+  pre teach me --no-file      # 不写 cwd/pre/teach.md
 
-3 个落点:
+3 个落点 (默认前 2):
   1. cwd/pre/teach.md         — 文件 persistent (任何 driver 都能 read), 幂等覆盖
-  2. bus send_message         — kind=teach, payload.text=教程, ping agent 去 read
-  3. stdout                   — 直接打印 (claude `!pre teach me` 看到)
+  2. bus send_message         — kind=chat, payload.text=教程, ping agent 去 read
+  3. stdout (默认 off)        — 跟 bus payload 内容重复; 仅 --stdout 或 bus 失败 fallback 打开
 
 教程内容按 caller 的 cli (claude/codex/gemini) customize:
   - memory 机制不同 (claude 走 ~/.claude/projects memory, codex/gemini 没原生 → pre/teach.md re-read)
@@ -147,12 +147,32 @@ def _build_teach_text(cli: str, target_agent_id: str, target_cwd: str) -> str:
         f"- audit: 派给 opensource agent (`mcp__pre__send_message` to_agent=local.cli-claude-code-local.opensource kind=command), 等 PASS reply 再 push\n",
         f"- 跨 sibling repo (pre / pre_ui / pre_rule / opensource) 改动: 走 bus 派给对方 agent, 不直接改文件\n\n",
 
-        f"## 6. findings 机制\n\n",
+        f"## 6. 主动派生新 agent (spawn)\n\n",
+        f"跨 sibling repo 派单的前提是对方 agent **已存在**. 若目标项目还没 agent (e.g. 新 clone 的 sibling repo / 临时拉个 helper), 要自己 spawn:\n\n",
+        f"前置: 目标 cwd 先 `pre init <cwd> --driver claude|codex|gemini` (建 pointer + agent_config + .claude/settings.json).\n\n",
+        f"拉起:\n",
+        f"```\n",
+        f"pre spawn <agent_id>          # agent_id = <node>.<driver_type>.<project>\n",
+        f"                              # 例: local.cli-claude-code-local.pre_ui\n",
+        f"pre spawn <agent_id> <tmux>   # 自定义 tmux session name\n",
+        f"```\n\n",
+        f"spawn 干的事:\n",
+        f"1. 从 `pre_rule/agents/*/agent_pointer.json` 反查 cwd\n",
+        f"2. 起 tmux session (`bash -ic 'source <rc> && exec <cli>'`), rc 走 `pre_rule/tmux_startup.sh` 加 PATH/proxy/egress\n",
+        f"3. claude driver 才写 `.claude/settings.json` hook (cmd=pre-tool-use/pre-stop-hook shim); codex/gemini 走 driver 内嵌 evaluator\n",
+        f"4. POST `/api/v1/nodes/<node>/rediscover`, 1s 后查 `/api/v1/agents` 确认注册\n\n",
+        f"典型场景:\n",
+        f"- 跨仓改动需要对方 agent 但对方 tmux 没起来 → `pre spawn <other_agent_id>`, 等注册到 bus 再 `mcp__pre__send_message` 派单\n",
+        f"- 临时 helper agent (e.g. opensource audit): cwd 已 init 过 → 直接 `pre spawn`\n",
+        f"- 远端 node spawn: agent_config.json `allowed_nodes` 写 remote-node, spawn 自动走 ssh 路径\n\n",
+        f"看全部 ops 命令: `pre --help` (init / migrate / repair / update / spawn / rm / list / status / usage / teach / bus).\n\n",
+
+        f"## 7. findings 机制\n\n",
         f"- 写 finding 文件到 cwd/pre/findings/{{LEVEL}}-{{title}}.md (LEVEL=CRITICAL/WARNING/INFO)\n",
         f"- Stop hook 自动 report + notify\n",
         f"- 处理完移到 cwd/pre/findings/processed/\n\n",
 
-        f"## 7. 下一步\n\n",
+        f"## 8. 下一步\n\n",
         f"读完本教程, 按上面 §4 形成 memory. 之后再跑 `pre teach me` 拿教程 diff (pre 文档变了内容跟着变).\n\n",
 
         f"---\n",
@@ -282,11 +302,11 @@ def main() -> int:
     p.add_argument("--cli", choices=list(_VALID_CLIS), default=None,
                    help="强制 cli flavor (默认从 agent_config.cli 读)")
     p.add_argument("--no-bus", action="store_true",
-                   help="不走 bus, 只写文件 + stdout")
-    p.add_argument("--no-stdout", action="store_true",
-                   help="不 print stdout (但仍写文件 + 走 bus)")
+                   help="不走 bus, 只写文件")
+    p.add_argument("--stdout", action="store_true",
+                   help="显式 print 教程全文到 stdout (默认 off, 避免跟 bus payload 重复)")
     p.add_argument("--no-file", action="store_true",
-                   help="不写 cwd/pre/teach.md (但仍走 bus + stdout)")
+                   help="不写 cwd/pre/teach.md")
     args = p.parse_args()
 
     cwd = os.getcwd()
@@ -325,18 +345,26 @@ def main() -> int:
         except OSError as e:
             print(f"{C_YELLOW}[warn]{C_RESET} write {teach_file} failed: {e}", file=sys.stderr)
 
+    bus_delivered = False
     if not args.no_bus and target_aid:
         ok, info = _send_via_master(target_aid, teach_text, teach_file)
         if ok:
             print(f"{C_CYAN}[bus]{C_RESET}    sent to {target_aid} (msg_id={info})",
                   file=sys.stderr)
+            bus_delivered = True
         else:
             print(f"{C_YELLOW}[bus]{C_RESET}    send failed: {info}", file=sys.stderr)
     elif not args.no_bus:
         print(f"{C_DIM}[bus skip]{C_RESET} 无 caller agent_id, 跳 bus", file=sys.stderr)
 
-    if not args.no_stdout:
+    # stdout 默认 off — bus payload 已含全文, 重复 print 会让 caller agent 双份吃.
+    # 仅 --stdout 显式开, 或 bus + file 都没成功时 fallback (否则 agent 拿不到).
+    fallback_stdout = (not bus_delivered) and args.no_file
+    if args.stdout or fallback_stdout:
         print(teach_text)
+    else:
+        print(f"{C_DIM}[stdout skip]{C_RESET} 教程已到 file/bus; --stdout 强制 print",
+              file=sys.stderr)
 
     return 0
 
