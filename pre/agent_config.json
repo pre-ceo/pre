@@ -4,5 +4,9 @@
   "project_name": "pre",
   "role": "platform",
   "driver_type": "cli-claude-code-local",
-  "cli": "claude"
+  "cli": "claude",
+  "mcp": {
+    "server": "pre",
+    "caller_agent_id": "local.cli-claude-code-local.pre"
+  }
 }
