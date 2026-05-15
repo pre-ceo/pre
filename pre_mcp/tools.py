@@ -46,7 +46,11 @@ def _caller_agent_id() -> str:
     """Caller agent_id 推断 (mcp client context). 简单方案: env PRE_CALLER_AGENT_ID
     or project-local pre/agent_config.json.
 
-    Fail-fast: caller identity is security/audit critical; do not guess from cwd."""
+    Fail-fast: caller identity is security/audit critical; do not guess from cwd.
+
+    PRE_CALLER_CWD 优先于 PWD: shim 在 `uv run --directory $PRE_ROOT` 覆盖 cwd 前
+    捕获 caller 真实 cwd 写到此 env. 没这一步, 所有 MCP caller 都被识别成 pre
+    (因为 uv 把子进程 cwd 拉到 $PRE_ROOT, PWD 也变 $PRE_ROOT)."""
     explicit = os.environ.get("PRE_CALLER_AGENT_ID")
     if explicit:
         return explicit
@@ -55,9 +59,9 @@ def _caller_agent_id() -> str:
         caller = _caller_from_agent_config(agent_config)
         if caller:
             return caller
-    pwd = os.environ.get("PWD")
-    if pwd:
-        caller = _caller_from_agent_config(os.path.join(pwd, "pre", "agent_config.json"))
+    caller_cwd = os.environ.get("PRE_CALLER_CWD") or os.environ.get("PWD")
+    if caller_cwd:
+        caller = _caller_from_agent_config(os.path.join(caller_cwd, "pre", "agent_config.json"))
         if caller:
             return caller
     return ""

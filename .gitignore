@@ -26,6 +26,7 @@ logs/
 /pre/findings/
 /pre/reports/
 /pre/teach.md
+/pre/pending_submit.json
 
 # OS / editor
 .DS_Store

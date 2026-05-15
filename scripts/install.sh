@@ -260,6 +260,10 @@ cat > "$ARG_BIN_DIR/pre-mcp" <<SHIM
 # pre-mcp shim — installed by scripts/install.sh.
 # set -a 让 PRE_MCP_SECRET 等 KEY=value 行被 export, 子进程才能 inherit.
 set -a; . "\$HOME/.pre/env"; set +a
+# 捕获 caller (claude code 会话) 的 cwd, 在 uv run --directory 覆盖之前导出.
+# 没这一步 tools.py::_caller_agent_id 永远读 \$PRE_ROOT/pre/agent_config.json,
+# 所有 MCP caller 被错误识别为 pre, from_agent 字段失真 (verdict / report 看不到真实 sender).
+export PRE_CALLER_CWD="\$PWD"
 exec uv run --directory "\$PRE_ROOT" python -m pre_mcp "\$@"
 SHIM
 chmod 755 "$ARG_BIN_DIR/pre-mcp"
