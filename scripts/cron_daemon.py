@@ -72,7 +72,14 @@ DEFAULT_MAX_FAILURES = 5
 RETRY_BACKOFF_SEC = (30, 120, 300)  # 30s, 2min, 5min
 JUMP_THRESHOLD_SEC = 60          # monotonic vs wall 跳变阈值
 MASTER_URL = os.environ.get("PRE_MASTER_URL", "http://127.0.0.1:19500")
-MASTER_TOKEN = os.environ.get("PRE_SECRET", "pre")
+# PR4 multi-token RBAC: 走 token_resolver 取 hook role token (CLI/daemon loopback).
+# 老 PRE_SECRET env 不再支持 (RBAC 重构后只有 PRE_<KIND>_SECRET 5 个分类 key).
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+from common.token_resolver import resolve as _resolve_token  # noqa: E402
+try:
+    MASTER_TOKEN = _resolve_token("hook")
+except Exception:  # noqa: BLE001 — fallback 让 daemon 仍能起, 但 master 调用会 401
+    MASTER_TOKEN = ""
 
 # ---------- daemon 全局状态 (healthz 用, 主线程 + http server thread 共享) ----------
 DAEMON_STATE = {

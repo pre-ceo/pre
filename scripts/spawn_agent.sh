@@ -97,7 +97,22 @@ fi
 
 MASTER_URL="${PRE_MASTER_URL:-http://127.0.0.1:19500}"
 NODE_ID="${PRE_NODE_ID:-local}"
-TOKEN="${PRE_SECRET:-fnpre}"
+
+# Token: source ~/.pre/env (caller shell 不一定 export PRE_*_SECRET), 然后取
+# PRE_HOOK_SECRET (CLI/runtime → master loopback 标准角色, CLAUDE.md token 表).
+# PR4 multi-token RBAC 后 PRE_SECRET 不再发行, 只剩 PRE_<KIND>_SECRET 5 个分类 key.
+# fallback 链: hook → operator (admin) → 空 (master 会 401).
+if [ -f "$HOME/.pre/env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$HOME/.pre/env"
+    set +a
+fi
+TOKEN="${PRE_HOOK_SECRET:-${PRE_OPERATOR_SECRET:-}}"
+if [[ -z "$TOKEN" ]]; then
+    # warn() 尚未声明 (line 162 后才有), 直接 echo 到 stderr
+    echo "[spawn_agent][warn] PRE_HOOK_SECRET / PRE_OPERATOR_SECRET 都没 (~/.pre/env 缺?), master 调用会 401" >&2
+fi
 
 # 读 agent_config.json 的 cli 字段, 决定 driver_type + 默认 start_command.
 # cli 值 → 三段 agent_id 第 2 段 (driver type_name).
