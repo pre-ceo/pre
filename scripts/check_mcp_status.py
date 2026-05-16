@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -166,14 +167,18 @@ def find_pre_mcp_for_cwd(cwd: Path) -> list[tuple[str, bool]]:
     pids = [p for p in r.stdout.strip().split("\n") if p]
     matches = []
     cwd_s = str(cwd)
+    # env block 在 ps eww 输出里是空格分隔 KEY=VALUE 对. 用值边界 (后跟空白 / 行尾)
+    # 避免 cwd 是兄弟项目前缀时误命中 (e.g. /Users/x/cursor/fn_ops 不应配
+    # /Users/x/cursor/fn_ops_account 的进程).
+    pat_correct = re.compile(rf"PRE_CALLER_CWD={re.escape(cwd_s)}(?=\s|$)")
+    pat_mention = re.compile(rf"=({re.escape(cwd_s)})(?=\s|$)")
     for pid in pids:
         env = _ps_env(pid)
         if not env:
             continue
-        # 该 pid env 是否含 PRE_CALLER_CWD=<this cwd>
-        has_correct = f"PRE_CALLER_CWD={cwd_s}" in env
+        has_correct = bool(pat_correct.search(env))
         # mention this cwd (PWD / OLDPWD / etc.) 但无 PRE_CALLER_CWD → 老 shim 跑的
-        has_cwd_mention = cwd_s in env and not has_correct
+        has_cwd_mention = bool(pat_mention.search(env)) and not has_correct
         if has_correct or has_cwd_mention:
             matches.append((pid, has_correct))
     return matches
