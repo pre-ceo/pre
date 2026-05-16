@@ -91,6 +91,65 @@ def _bus_restart() -> int:
     return subprocess.call(["bash", bus_sh, "restart"])
 
 
+def _ensure_mcp_env_binding() -> int:
+    """Idempotent guard: 若 ~/.pre/env::PRE_MCP_SECRET 绑死单个 agent_id
+    (含 '.', e.g. local.cli-claude-code-local.pre), auto-rotate 到 node-prefix
+    mcp-default token (binding='local'). 已正确则 no-op.
+
+    引入背景: 8e8475c pre-mcp shim 加 PRE_CALLER_CWD 后, sibling repos 的
+    MCP 调用真实 caller_agent_id 不再被误识别成 'pre'; 但若 env 用的是严格
+    绑定 token, master verify_token 反而拒掉 sibling. 老机器 `pre update` 走
+    一次这里就自动迁好.
+
+    失败不阻 update — 仅 warn."""
+    print(f"\n{C_MAGENTA}━━━ ensure MCP env binding (node prefix) ━━━{C_RESET}")
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    try:
+        from _token_lib import ensure_mcp_env_uses_node_prefix
+    except ImportError as e:
+        print(f"{C_YELLOW}[skip] _token_lib import failed: {e}{C_RESET}")
+        return 0
+    try:
+        result = ensure_mcp_env_uses_node_prefix()
+    except Exception as e:  # noqa: BLE001 — guard step, 不阻 update
+        print(f"{C_YELLOW}[skip] unexpected error: {type(e).__name__}: {e}{C_RESET}")
+        return 0
+
+    status = result.get("status")
+    if status == "ok":
+        reason = result.get("reason", "?")
+        # already_node_prefix 是 happy path; 其他 ok 是 benign edge cases
+        if reason == "already_node_prefix":
+            print(f"{C_DIM}[ok] PRE_MCP_SECRET 已绑 node prefix "
+                  f"(label='{result.get('label')}'), no-op.{C_RESET}")
+        else:
+            print(f"{C_DIM}[ok] {reason} — no-op{C_RESET}")
+        return 0
+
+    if status == "swapped":
+        print(f"{C_CYAN}[swapped]{C_RESET} {result.get('old_label')} "
+              f"({C_DIM}bound={result.get('old_bound_agent_id')}{C_RESET}) "
+              f"→ {result.get('new_label')} "
+              f"({C_DIM}bound={result.get('new_bound_agent_id')}{C_RESET})")
+        print(f"{C_DIM}     ~/.pre/env PRE_MCP_SECRET {result.get('env_marker')} (mode 600); "
+              f"raw 未打印{C_RESET}")
+        print(f"{C_DIM}     sibling claude code session 用到时需重启读新 env "
+              f"(tmux kill + pre spawn){C_RESET}")
+        return 0
+
+    # error
+    reason = result.get("reason", "?")
+    print(f"{C_YELLOW}[warn] {reason}{C_RESET}")
+    if "hint" in result:
+        print(f"{C_DIM}     {result['hint']}{C_RESET}")
+    if reason == "env_rewrite_failed":
+        # 应急 raw 必须给 user 让其手动写回
+        print(f"{C_YELLOW}     db 已 rotated 但 env 写失败. 手动写到 ~/.pre/env:{C_RESET}")
+        print(f"       PRE_MCP_SECRET={result.get('raw_emergency')}")
+    return 0  # 失败不阻 update
+
+
 def _refresh_mcp() -> int:
     """重 register pre mcp shim 给 claude/codex/gemini. mv repo / 升级后必跑,
     确保各 cli 的 mcp config command 指当前 PRE_ROOT 的 ~/.local/bin/pre-mcp shim.
@@ -147,6 +206,8 @@ def main() -> int:
                    help="skip pre bus restart (daemon keeps running old code)")
     p.add_argument("--no-mcp-refresh", action="store_true",
                    help="skip refresh mcp registration in claude/codex/gemini")
+    p.add_argument("--no-mcp-env-check", action="store_true",
+                   help="skip ~/.pre/env PRE_MCP_SECRET binding auto-rotate guard")
     args = p.parse_args()
 
     pre_repo = _PRE_ROOT
@@ -173,6 +234,11 @@ def main() -> int:
 
     if not args.no_mcp_refresh:
         _refresh_mcp()  # 失败不阻 bus restart, 仅打 warn
+
+    # idempotent guard: 8e8475c shim 修后, 老机器 env 可能仍指严格绑定 token,
+    # 走一次自动 rotate 到 node prefix. happy path 是 no-op.
+    if not args.no_mcp_env_check:
+        _ensure_mcp_env_binding()
 
     if not args.no_restart:
         if _bus_restart() != 0:
