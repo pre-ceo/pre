@@ -13,6 +13,7 @@
   usage <action>       usage subsystem (sys_* tmux + cron probe):
                        install — spawn sys_* + ensure schedule + verify
   teach [target]       发 pre 教程给 agent (target=me|<agent_id>, 走 bus + 写 cwd/pre/teach.md)
+  check-mcp            诊 sibling MCP 健康 (shim 版本 / env token 绑定 / 每 agent 后子进程状态)
   bus <action> [tgt]   管理 master/node/ui/cron daemon (= bus_ctl.sh):
                        start | stop | restart | status | logs | attach | sync
 
@@ -80,6 +81,12 @@ def _cmd_teach(rest):
     import pre_teach
     sys.argv = ["pre teach"] + rest
     return pre_teach.main()
+
+
+def _cmd_check_mcp(rest):
+    import check_mcp_status
+    sys.argv = ["pre check-mcp"] + rest
+    return check_mcp_status.main()
 
 
 def _resolve_rule_root() -> str:
@@ -542,6 +549,7 @@ _COMMANDS = {
     "status": _cmd_status,
     "usage": _cmd_usage,
     "teach": _cmd_teach,
+    "check-mcp": _cmd_check_mcp,
 }
 
 
@@ -560,6 +568,7 @@ def _usage():
     print("  usage <action>       usage subsystem (sys_* tmux + cron probe)")
     print("                       actions: install")
     print("  teach [target]       send pre tutorial to agent (target=me|<agent_id>)")
+    print("  check-mcp            diagnose sibling MCP health (shim / env / per-agent)")
     print("  bus <action> [tgt]   manage master/node/ui/cron daemons")
     print("                       actions: start|stop|restart|status|logs|attach|sync")
     print()
