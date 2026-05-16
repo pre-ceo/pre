@@ -2,11 +2,13 @@
 # scripts/spawn_agent.sh — 拉起一个 agent (tmux + claude code, 注册到总线)
 #
 # 用法:
-# bash scripts/spawn_agent.sh <agent_id> [tmux_session_override]
+# bash scripts/spawn_agent.sh <agent_id|short_name> [tmux_session_override]
 #
-# agent_id e.g. local.cli-claude-code-local.pre — 由 pre-init 初始化时产生.
-# 本脚本从 pre_rule/agents/<dir>/agent_pointer.json 反查 cwd, 不再假定 PRE_AGENT_HOME/<project>.
-# 必须先用 scripts/pre_init.py 在 agent cwd 初始化, 否则 pointer 不存在会失败.
+# 入参 ARG1 接受:
+#   - 完整 agent_id 形如 `local.cli-claude-code-local.pre_ui` (3 段, '.' 分隔)
+#   - 短名形如 `pre_ui` (= agent_id 末段 = cwd basename, 通常 = tmux session 名)
+# 短名匹配走 pre_rule/agents/<dir>/agent_pointer.json 反查, 自动解析为完整 agent_id.
+# 必须先用 `pre init <cwd>` 注册 agent (写 pointer + agent_config), 否则匹配不到 → exit 3.
 # 起完后 POST /api/v1/nodes/<node>/rediscover 让 node 重发现 + 注册.
 #
 # 依赖: tmux, curl, claude (PATH), python3 (解析 pointer / agent_config.json)
@@ -15,22 +17,25 @@ set -euo pipefail
 
 ARG1="${1:-}"
 
-if [[ -z "$ARG1" || "$ARG1" != *.* ]]; then
-    echo "[spawn_agent] 用法: $0 <agent_id> [tmux_session_override]" >&2
-    echo "  agent_id 形如: local.cli-claude-code-local.pre (3 段, '.' 分隔)" >&2
-    echo "  必须先用 'python3 scripts/pre_init.py <cwd>' 注册 agent" >&2
+if [[ -z "$ARG1" ]]; then
+    echo "[spawn_agent] 用法: $0 <agent_id|short_name> [tmux_session_override]" >&2
+    echo "  agent_id : local.cli-claude-code-local.pre_ui (完整 3 段)" >&2
+    echo "  short    : pre_ui (= agent_id 末段 = cwd basename = tmux 名, 推荐)" >&2
+    echo "  必须先用 'pre init <cwd>' 注册 agent" >&2
     exit 2
 fi
-
-AGENT_ID_FULL="$ARG1"
-PROJECT="${ARG1##*.}"
 
 # pre_rule root: PRE_RULE_ROOT > pre repo sibling (与 src/config.py:RULE_ROOT 一致)
 _SCRIPT_DIR_INIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PRE_ROOT_INIT="$(dirname "$_SCRIPT_DIR_INIT")"
 RULE_ROOT="${PRE_RULE_ROOT:-$(dirname "$_PRE_ROOT_INIT")/pre_rule}"
 
-# 反查 pointer 找 cwd: 遍历 pre_rule/agents/*/agent_pointer.json 匹配 agent_id 字段
+# 反查 pointer 找 cwd: 遍历 pre_rule/agents/*/agent_pointer.json 匹配 ARG1.
+# 匹配规则 (任一命中):
+#   - agent_id 字段 == ARG1 (完整 3 段, e.g. local.cli-claude-code-local.pre_ui)
+#   - agent_id 末段 == ARG1 (短名, e.g. pre_ui)
+#   - cwd basename == ARG1 (短名兜底, 处理 agent_id 末段跟 dir 名不一致的边缘 case)
+AGENT_ID_FULL=""
 POINTER_CWD=""
 RULE_AGENT_DIR=""
 if [[ -d "$RULE_ROOT/agents" ]]; then
@@ -49,7 +54,12 @@ except Exception:
 " 2>/dev/null) || continue
         _aid=$(printf '%s\n' "$_vals" | sed -n '1p')
         _cwd=$(printf '%s\n' "$_vals" | sed -n '2p')
-        if [[ "$_aid" == "$AGENT_ID_FULL" ]]; then
+        _aid_last="${_aid##*.}"
+        _cwd_base=$(basename "$_cwd" 2>/dev/null || echo "")
+        if [[ "$_aid" == "$ARG1" \
+              || "$_aid_last" == "$ARG1" \
+              || "$_cwd_base" == "$ARG1" ]]; then
+            AGENT_ID_FULL="$_aid"
             POINTER_CWD="$_cwd"
             RULE_AGENT_DIR="${pdir%/}"
             break
@@ -58,12 +68,14 @@ except Exception:
 fi
 
 if [[ -z "$POINTER_CWD" ]]; then
-    echo "[spawn_agent] FATAL: agent_pointer.json for agent_id='$AGENT_ID_FULL' not found" >&2
+    echo "[spawn_agent] FATAL: 没在 pointer 里匹配到 '$ARG1'" >&2
     echo "  searched: $RULE_ROOT/agents/*/agent_pointer.json" >&2
-    echo "  run 'python3 $_PRE_ROOT_INIT/scripts/pre_init.py <cwd>' first" >&2
+    echo "  匹配规则: agent_id 全名 / 末段 / cwd basename" >&2
+    echo "  先跑 'pre init <cwd>' 注册 agent" >&2
     exit 3
 fi
 
+PROJECT="${AGENT_ID_FULL##*.}"
 PROJECT_DIR="$POINTER_CWD"
 
 # tmux_session: $2 override > cwd/pre/agent_config.tmux_session > PROJECT
@@ -522,6 +534,14 @@ if [ -n "$_sister" ]; then
         "session=$TMUX_SESSION" "sisters=$(echo "$_sister" | tr '\n' ',')"
     warn "[M2] 同前缀 sister sessions: $(echo "$_sister" | tr '\n' ',') (audit logged)"
 fi
+# Restart 模式 (PRE_SPAWN_RESTART=1): 先 kill 已存在的 tmux session, 让下面 if 走启动分支.
+# `pre spawn restart <id>` 触发, 配合 PRE_SPAWN_CONTINUE=1 让 claude 走 --continue 恢复对话.
+if [[ "${PRE_SPAWN_RESTART:-}" == "1" ]] && tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+    info "[restart] kill 旧 tmux session $TMUX_SESSION (PRE_SPAWN_RESTART=1)"
+    tmux kill-session -t "=$TMUX_SESSION" 2>/dev/null || true
+    audit "tmux_restart_kill" "ok" "session=$TMUX_SESSION"
+fi
+
 if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
     ok "tmux session $TMUX_SESSION 已存在, 跳过启动"
 else
@@ -532,6 +552,15 @@ else
         if [[ -n "$custom" ]]; then
             START_CMD="$custom"
         fi
+    fi
+    # Continue 模式 (PRE_SPAWN_CONTINUE=1): 给 claude 加 --continue 恢复最近会话.
+    # codex/gemini 没等价 verbatim flag, warn 后 fresh 起.
+    if [[ "${PRE_SPAWN_CONTINUE:-}" == "1" ]]; then
+        case "$AGENT_CLI" in
+            claude) START_CMD="$START_CMD --continue" ;;
+            codex|gemini)
+                warn "[continue] $AGENT_CLI 无 verbatim --continue, fresh 启动 (agent 对话上下文丢)" ;;
+        esac
     fi
     info "起 tmux session [$TMUX_SESSION] 在 $PROJECT_DIR 跑: $START_CMD (rc=$LOCAL_TMUX_RC)"
     # wrap with tmux_startup rc (proxy + JP egress 验证)

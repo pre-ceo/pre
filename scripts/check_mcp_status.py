@@ -222,8 +222,8 @@ def main() -> int:
         elif has_stale:
             verdict = f"{C_YELLOW}NEEDS RESTART{C_RESET}"
             hint = (f"pre-mcp 子进程跑老 shim 起的 (无 PRE_CALLER_CWD env). "
-                    f"`tmux kill-session -t {tmux_name}; pre spawn {cfg_info.get('caller_agent_id')}`")
-            needs_restart.append((tmux_name, cfg_info.get("caller_agent_id")))
+                    f"`pre spawn restart {name}` (短名 = tmux session 名)")
+            needs_restart.append((tmux_name, name))
         else:
             verdict = f"{C_DIM}NO_MCP{C_RESET}"
             hint = "tmux 在, 但没找到 pre-mcp 子进程 (claude code 没起 / agent 不调 MCP)"
@@ -243,8 +243,8 @@ def main() -> int:
     print(f"{C_BLUE}[summary]{C_RESET}")
     if needs_restart:
         print(f"  {_warn()} {len(needs_restart)} sibling 需重启拿新 shim:")
-        for tmux_name, aid in needs_restart:
-            print(f"      tmux kill-session -t {tmux_name}; pre spawn {aid}")
+        for _tmux_name, short in needs_restart:
+            print(f"      pre spawn restart {short}")
     else:
         print(f"  {_sym(True)} all online siblings 都 post-fix, 无需重启")
     if shim_status != "OK" or env_status != "OK":

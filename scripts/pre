@@ -6,7 +6,9 @@
   migrate              迁移老 pre_rule/agents/<dir>/ 到 pointer 格式 (= pre_migrate.py)
   repair [cwd]         强制重写 cwd agent_config + .claude hook (= pre_repair.py)
   update               git pull pre + pre_ui, uv sync, bus restart (= pre_update.py)
-  spawn <id>           起 tmux session + 通知 master rediscover (= spawn_agent.sh)
+  spawn <id|short>     起 tmux session + 通知 master rediscover (= spawn_agent.sh)
+                       <short> = agent_id 末段 = cwd basename (e.g. pre_ui), 推荐
+  spawn restart <id>   kill 老 tmux + 重起, claude 走 --continue 恢复对话上下文
   rm <id|dir>          删除 pre_rule/agents/<dir>/ 索引 (不动 cwd)
   list                 列所有 discover_agents 结果 + 状态
   status               整体组件状态 (bus subsystems + cron schedules + wiring)
@@ -68,8 +70,19 @@ def _cmd_update(rest):
 
 
 def _cmd_spawn(rest):
+    """`pre spawn <id>` 起 tmux + claude.
+    `pre spawn restart <id>` kill 已有 tmux + 重起, claude 走 --continue 恢复对话.
+    codex/gemini 没等价 verbatim flag, restart 仍 fresh 起 (warn)."""
     spawn_sh = os.path.join(_HERE, "spawn_agent.sh")
-    return subprocess.call(["bash", spawn_sh] + rest)
+    env = os.environ.copy()
+    if rest and rest[0] == "restart":
+        env["PRE_SPAWN_RESTART"] = "1"
+        env["PRE_SPAWN_CONTINUE"] = "1"
+        rest = rest[1:]
+        if not rest:
+            print("usage: pre spawn restart <agent_id> [tmux_session]", file=sys.stderr)
+            return 2
+    return subprocess.call(["bash", spawn_sh] + rest, env=env)
 
 
 def _cmd_bus(rest):
@@ -561,7 +574,9 @@ def _usage():
     print("  migrate              migrate legacy pre_rule/agents/ to pointer format")
     print("  repair [cwd]         force-rewrite agent_config + .claude hook in cwd")
     print("  update               git pull pre + pre_ui, uv sync, bus restart")
-    print("  spawn <id>           start tmux session for agent_id + notify master")
+    print("  spawn <id|short>     start tmux session for agent_id + notify master")
+    print("                       <short> = agent_id 末段 / cwd basename (e.g. pre_ui)")
+    print("  spawn restart <id>   kill existing tmux + spawn fresh (claude --continue)")
     print("  rm <id|dir>          remove pre_rule/agents/<dir>/ index (cwd untouched)")
     print("  list                 list all discovered agents with status")
     print("  status               overall component status (subsystems + cron + wiring)")
