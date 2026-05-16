@@ -13,6 +13,11 @@ dependencies = [
     "mcp>=1.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 pre-mcp = "pre_mcp.__main__:main"
 
@@ -28,3 +33,10 @@ packages = [
     "src", "src.master", "src.node", "src.drivers", "src.runtime",
     "pre_mcp",
 ]
+
+[tool.pytest.ini_options]
+# tests/conftest.py 负责 sys.path 注入 src/ 跟 pre_mcp/.
+# 跑法: uv run --with pytest pytest tests/ -v
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
