@@ -1,0 +1,9 @@
+{
+  "mode": "supervised",
+  "cli": "claude",
+  "role": "gover_review",
+  "_purpose": "pre 项目内部 agent — 周期审查 governor ask 历史, 输出规则改进 proposal",
+  "_workdir": "~/.pre/internal_agents/gover_review",
+  "_managed_by": "pre install / pre update — 不要手改",
+  "_note_mode": "agent_config.mode = 自主等级 (supervised/autonomous/freerun). cfg.mode=enforce 在 pre_rule/config.json 全局生效, 不在这."
+}

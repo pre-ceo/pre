@@ -315,6 +315,13 @@ fe ui:
 EOF
 fi
 
+# === gover_review internal agent (周期审查 governor ask, 输出规则改进 proposal) ===
+# 装 workdir 模板 + pre init 注册 + cron schedule + 异步首次 trigger.
+# 失败仅 warn, 不阻塞主 install.
+if ! python3 "$PRE_ROOT/scripts/install_gover_review.py"; then
+    echo "[warn] gover_review install 失败 (非 fatal, 主 install 继续)"
+fi
+
 cat <<EOF
 next steps:
   1. pre bus start          # 起 master + node + ui + cron (tmux 长驻)

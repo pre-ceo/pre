@@ -208,6 +208,8 @@ def main() -> int:
                    help="skip refresh mcp registration in claude/codex/gemini")
     p.add_argument("--no-mcp-env-check", action="store_true",
                    help="skip ~/.pre/env PRE_MCP_SECRET binding auto-rotate guard")
+    p.add_argument("--no-gover-review", action="store_true",
+                   help="skip gover_review internal agent re-install (template + cron + trigger)")
     args = p.parse_args()
 
     pre_repo = _PRE_ROOT
@@ -239,6 +241,14 @@ def main() -> int:
     # 走一次自动 rotate 到 node prefix. happy path 是 no-op.
     if not args.no_mcp_env_check:
         _ensure_mcp_env_binding()
+
+    # gover_review internal agent — workdir 模板 + cron + 异步 trigger 全幂等
+    if not args.no_gover_review:
+        rc = subprocess.call(
+            ["python3", os.path.join(_HERE, "install_gover_review.py")]
+        )
+        if rc != 0:
+            print(f"{C_YELLOW}gover_review install rc={rc} — 非 fatal, 继续{C_RESET}")
 
     if not args.no_restart:
         if _bus_restart() != 0:
