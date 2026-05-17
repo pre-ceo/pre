@@ -258,12 +258,19 @@ done
 cat > "$ARG_BIN_DIR/pre-mcp" <<SHIM
 #!/usr/bin/env bash
 # pre-mcp shim — installed by scripts/install.sh.
-# set -a 让 PRE_MCP_SECRET 等 KEY=value 行被 export, 子进程才能 inherit.
-set -a; . "\$HOME/.pre/env"; set +a
-# 捕获 caller (claude code 会话) 的 cwd, 在 uv run --directory 覆盖之前导出.
-# 没这一步 tools.py::_caller_agent_id 永远读 \$PRE_ROOT/pre/agent_config.json,
-# 所有 MCP caller 被错误识别为 pre, from_agent 字段失真 (verdict / report 看不到真实 sender).
-export PRE_CALLER_CWD="\$PWD"
+# stdout 是 MCP stdio 协议通道, 只能让 \`python -m pre_mcp\` 写. setup 段
+# 任何意外字节进 stdout (env 里 echo / curl / source ~/rule.sh 的提示行 /
+# nvm banner) 会让 MCP client 解析失败 "Failed to connect".
+# 把整段 setup 的 stdout 用 1>&2 改投 stderr — stderr 不属于协议, Claude
+# Code 会收进日志, 诊断信息照样看得到.
+{
+  # set -a 让 PRE_MCP_SECRET 等 KEY=value 行被 export, 子进程才能 inherit.
+  set -a; . "\$HOME/.pre/env"; set +a
+  # 捕获 caller (claude code 会话) 的 cwd, 在 uv run --directory 覆盖之前导出.
+  # 没这一步 tools.py::_caller_agent_id 永远读 \$PRE_ROOT/pre/agent_config.json,
+  # 所有 MCP caller 被错误识别为 pre, from_agent 字段失真.
+  export PRE_CALLER_CWD="\$PWD"
+} 1>&2
 exec uv run --directory "\$PRE_ROOT" python -m pre_mcp "\$@"
 SHIM
 chmod 755 "$ARG_BIN_DIR/pre-mcp"
