@@ -2914,11 +2914,88 @@ async def handle_http(reader, writer, method, path, headers, body, registry, db)
                     },
                     "events": events,
                 }, ensure_ascii=False)
+        elif path == "/api/v1/audit/kinds":
+            # 统一 audit 视图 metadata (给 pre_ui tab 用).
+            # 仅静态返 KIND 元信息 (desc / fields / filters), 不读文件 → 无 IO.
+            # 鉴权与限频跟 /audit/list / /notify/audit 一致, 复用 _audit_rate_check.
+            import hashlib as _hashlib_k
+            from master.audit_view import list_kinds as _list_kinds
+            auth_h_k = headers.get("authorization", "") or headers.get("Authorization", "")
+            bearer_key_k = _hashlib_k.sha256(auth_h_k.encode("utf-8")).hexdigest()[:12]
+            ok_rate_k, rate_reason_k = _audit_rate_check(bearer_key_k)
+            if not ok_rate_k:
+                status = 429
+                response_body = json.dumps({"error": "rate_limited",
+                                              "retry_after": 60,
+                                              "detail": rate_reason_k})
+            else:
+                response_body = json.dumps({"kinds": _list_kinds()},
+                                              ensure_ascii=False)
+        elif path == "/api/v1/audit/list":
+            # 统一 audit 读端点 (8 kind 任选). 替代 /notify/audit (后者保留兼容).
+            # 三道护栏: 字段白名单 / 字符串 redact / 衍生字段处理 (cwd 丢 / args→args_keys)
+            # 限制: since ≤30d / limit ≤500 / 30 /min 限频 / fail-closed kind 校验
+            import hashlib as _hashlib_l
+            from master.audit_view import KINDS as _AUDIT_KINDS, \
+                read_entries as _audit_read_entries
+            auth_h_l = headers.get("authorization", "") or headers.get("Authorization", "")
+            bearer_key_l = _hashlib_l.sha256(auth_h_l.encode("utf-8")).hexdigest()[:12]
+            ok_rate_l, rate_reason_l = _audit_rate_check(bearer_key_l)
+            if not ok_rate_l:
+                status = 429
+                response_body = json.dumps({"error": "rate_limited",
+                                              "retry_after": 60,
+                                              "detail": rate_reason_l})
+            else:
+                kind = (query.get("kind", "") or "").strip()
+                if kind not in _AUDIT_KINDS:
+                    status = 400
+                    response_body = json.dumps({
+                        "error": "invalid_kind",
+                        "valid_kinds": sorted(_AUDIT_KINDS.keys()),
+                    })
+                else:
+                    now_ts_l = time.time()
+                    try:
+                        since_l = float(query.get("since", "") or 0)
+                    except (ValueError, TypeError):
+                        since_l = 0
+                    min_since_l = now_ts_l - 30 * 86400
+                    if since_l < min_since_l:
+                        since_l = min_since_l
+                    try:
+                        limit_l = int(query.get("limit", "200") or "200")
+                    except (ValueError, TypeError):
+                        limit_l = 200
+                    limit_l = max(1, min(500, limit_l))
+                    # filters: KIND.filters 内的 key 进白名单, 其余丢
+                    filter_spec_l = _AUDIT_KINDS[kind].get("filters", {})
+                    filters_l = {}
+                    for fkey in filter_spec_l.keys():
+                        fval = query.get(fkey, "")
+                        if fval:
+                            filters_l[fkey] = fval
+                    from pathlib import Path as _Path_l
+                    log_root_l = _Path_l(_PRE_LOG_ROOT)
+                    rows_l, truncated_l = _audit_read_entries(
+                        kind=kind, since=since_l, limit=limit_l,
+                        filters=filters_l, log_root=log_root_l,
+                    )
+                    response_body = json.dumps({
+                        "kind": kind,
+                        "audit": rows_l,
+                        "total": len(rows_l),
+                        "truncated": truncated_l,
+                        "since": since_l,
+                        "limit": limit_l,
+                        "filters": filters_l,
+                    }, ensure_ascii=False)
         elif path == "/api/v1/notify/audit":
             # read-only mobile_audit 暴露给 pre_ui UI
             # + (T-i fail-closed / T-iii 限频 30/min / T-iv VIRTUAL_AGENTS hardcoded)
             # + 子条款 (b) 字段白名单 + SENSITIVE_PATTERNS 6 类前置脱敏
             # + 严守 since ≤30 天 / limit ≤500 / 9 字段固定不许多
+            # NOTE: /api/v1/audit/list?kind=mobile 是新统一入口, 本端点保留兼容.
             import hashlib as _hashlib
             import re as _re
             # Bearer 鉴权已在上层 _check_auth 走过, 这里不重做; 取 token sha256[:12] 做限频 key
