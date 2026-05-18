@@ -2,8 +2,9 @@
 """gover_review 安装 entry — install.sh / pre_update.py 末尾调.
 
 做 4 件事 (幂等):
-  1. pre_init.py <workdir> --driver claude --no-templates → 写 pointer + .claude/settings.json
-  2. install_workdir(workdir, force=True) → 覆盖 agent_config / next.md / rules.md
+  1. install_workdir(workdir, force=True) → 建 workdir + 写 agent_config / next.md / rules.md
+  2. pre_init.py <workdir> --driver claude --no-templates → 写 pointer + .claude/settings.json
+     (顺序关键: pre_init 要求 target_dir 存在, 必须在 install_workdir 之后)
   3. install_schedule(trigger.sh, schedules.json) → cron entry merge
   4. fire_initial_trigger() → 异步 fire-and-forget 跑一次 trigger.sh (cron interval 首次
      也会立即跑, 这是双保险)
@@ -114,13 +115,9 @@ def main(
     print(f"{C_DIM}  trigger.sh     = {trigger_script}{C_RESET}")
     print(f"{C_DIM}  schedules.json = {schedules_file}{C_RESET}")
 
-    if not skip_pre_init:
-        rc = run_pre_init(workdir, pre_root=pre_root)
-        if rc != 0:
-            print(
-                f"{C_YELLOW}[warn] pre_init rc={rc} — agent 未正确注册, spawn 时可能失败{C_RESET}"
-            )
-
+    # 顺序关键: install_workdir 先建目录 + 写模板, pre_init 才能在已存在的 target_dir
+    # 上注册 pointer + .claude/settings.json. 反过来第一次跑 pre_init 会因为
+    # "target_dir does not exist" 失败, pointer 不写, cron_trigger 反查 pointer 失败.
     r = install_workdir(workdir, force=True)
     if r["errors"]:
         print(f"{C_YELLOW}[error] install_workdir: {r['errors']}{C_RESET}")
@@ -129,6 +126,13 @@ def main(
         f"{C_CYAN}[ok]{C_RESET} templates installed "
         f"({len(r['created'])} files at {r['pre_dir']})"
     )
+
+    if not skip_pre_init:
+        rc = run_pre_init(workdir, pre_root=pre_root)
+        if rc != 0:
+            print(
+                f"{C_YELLOW}[warn] pre_init rc={rc} — agent 未正确注册, spawn 时可能失败{C_RESET}"
+            )
 
     r2 = install_schedule(trigger_script, schedules_file)
     print(
