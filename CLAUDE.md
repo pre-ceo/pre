@@ -80,6 +80,38 @@ Caller 侧:
 
 新增危险模式优先加到黑名单 (步 1), 不要塞进 governor 的 prompt.
 
+## Bash 使用规范 (对 governor 友好)
+
+**核心准则: 不写一次性内联 bash, 改成 "脚本 + 文档" 入仓.**
+
+为什么:
+- governor 缓存 key 是命令字面量. 内联命令每次都略有差异 (路径 / 参数 / 时间戳)
+  → 每次都 cache miss → 每次都要跑 8s 级别的 claude -p
+- 仓内固定脚本路径只产生**一次** governor verdict, 后续调用走步 4 缓存命中,
+  甚至可以直接进步 3 白名单 (`bash scripts/xxx.sh ...` 这种前缀稳定)
+- transcript 里出现的是脚本路径, 不是 multi-line heredoc / 长 pipe, 可读可审计可复用
+
+怎么做:
+1. **凡多于一个动作的 bash** (pipe / `&&` 串联 / `for` 循环 / heredoc / 临时 `awk`/`sed`)
+   → 先落地到 `scripts/<name>.sh` 或 `dev-workflow/scripts/<name>.sh`
+2. 脚本头写一段注释文档: 用途, 输入参数, 退出码, 调用示例. 复杂脚本配套
+   `scripts/<name>.md` 单独文档
+3. 调用走 `bash scripts/<name>.sh <args>` 形式. 同一脚本第二次起 governor 缓存命中
+4. 真正一行就完事的 read-only 命令 (`ls`, `git status`, `cat <file>`, `grep -r foo .`)
+   仍然直接跑 — 这条规则针对**组合命令**, 不是所有 bash
+
+允许的内联例外 (governor 不应该被它们卡):
+- `git` 单命令 (含常规 flag)
+- `ls` / `cat` / `head` / `tail` / `wc` / `find` 单命令
+- `pytest` / `python -m xxx` / `node xxx` 启动测试
+- 已在 `_BASH_SAFE_PREFIXES` / `_INLINE_SAFE_RE` 命中的模式
+
+落地动作:
+- 写脚本后**就地 commit** (即使是 dev-workflow 一次性诊断脚本), 让下次 agent
+  能复用 / 让 governor 缓存稳定 key
+- 脚本里硬编码项目相对路径 (`PRE_ROOT="${PRE_ROOT:-$HOME/cursor/pre}"`),
+  不要在调用时拼绝对路径 — 否则又变 cache miss
+
 ## Stop hook 不分析下一步
 
 Stop hook 是**纯观测**: 记录 / 检测 finding / 通知, 不调用 LLM, 不给
