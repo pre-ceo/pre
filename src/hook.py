@@ -7,6 +7,7 @@ stdin (JSON) → evaluate_prehook → stdout (Claude Code hookSpecificOutput JSO
   - transcript_path 副作用持久化 (供 stop hook)
   - 调 evaluator
   - hookSpecificOutput JSON 包装
+  - claude_driver audit jsonl 写入 (见 src/claude_driver_audit.py)
 
 I/O 契约遵循 Claude Code PreToolUse 官方规范:
   Input:  { tool_name, tool_input, session_id, cwd, permission_mode, ... }
@@ -20,6 +21,7 @@ import json
 
 from .config import load_config
 from .prehook_evaluator import evaluate_prehook
+from .claude_driver_audit import audit_decision as _audit_claude_driver
 
 
 def main():
@@ -45,9 +47,14 @@ def main():
         result = evaluate_prehook(input_data)
     except Exception as e:
         # fail-closed: evaluator 异常 → ask
+        _audit_claude_driver(input_data, {"source": "fallback"}, "ask",
+                             f"evaluator raised: {e}")
         return output("ask", f"evaluator raised: {e}")
 
-    return output(result.get("decision", "ask"), result.get("reason", ""))
+    decision = result.get("decision", "ask")
+    reason = result.get("reason", "")
+    _audit_claude_driver(input_data, result, decision, reason)
+    return output(decision, reason)
 
 
 def output(decision: str, reason: str):

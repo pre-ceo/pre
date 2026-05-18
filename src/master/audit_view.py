@@ -97,8 +97,10 @@ KINDS: dict[str, dict] = {
         "desc": "MCP tool call audit (per-node jsonl)",
     },
     "driver_decision": {
-        # 多目录: codex + gemini, driver 字段从目录名衍生
-        "dirs": ["codex_driver", "gemini_driver"],
+        # 多目录: claude + codex + gemini, driver 字段从目录名衍生.
+        # claude 走 PreToolUse hook 路径 (src/hook.py 写 audit), codex/gemini 走
+        # driver 内嵌 evaluator + pane scrape (driver._audit 写). schema 对齐.
+        "dirs": ["claude_driver", "codex_driver", "gemini_driver"],
         "glob": "auto_decision_*.jsonl",
         "ts_format": "iso",
         # cwd 字段含 home path, 必丢
@@ -108,7 +110,7 @@ KINDS: dict[str, dict] = {
         "filters": {"driver": "exact", "agent_id": "substr",
                     "tool_name": "exact", "decision": "exact",
                     "source": "exact", "action": "exact"},
-        "desc": "codex/gemini driver governor decision audit",
+        "desc": "claude/codex/gemini driver governor decision audit",
     },
 }
 
